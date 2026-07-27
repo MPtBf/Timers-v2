@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import { COLORS, TIMER } from "../constants";
   import { TimerModel, type TimerState } from "./timer.svelte";
   import CircularProgress from "./CircularProgress.svelte";
@@ -10,9 +11,10 @@
   let remainingMs: number = $state(0);
   let durationMs: number = $state(0);
   let inputMinutes: number = $state(5);
-  let beepEnabled: boolean = $state(true);
 
   let timer = $state(new TimerModel());
+  let beepInterval: ReturnType<typeof setInterval> | null = $state(null);
+  let flashInterval: ReturnType<typeof setInterval> | null = $state(null);
 
   let progress = $derived(durationMs > 0 ? 1 - remainingMs / durationMs : 0);
   let isOvertime = $derived(remainingMs < 0);
@@ -35,11 +37,30 @@
           ? COLORS.accentPaused
           : COLORS.accentStopped
   );
-  let canStart = $derived(state === "stopped" && inputMinutes > 0);
+
+  function stopOvertime() {
+    if (beepInterval !== null) {
+      clearInterval(beepInterval);
+      beepInterval = null;
+    }
+    if (flashInterval !== null) {
+      clearInterval(flashInterval);
+      flashInterval = null;
+    }
+  }
+
+  function startOvertime() {
+    stopOvertime();
+    invoke("beep_system");
+    invoke("flash_window");
+    beepInterval = setInterval(() => invoke("beep_system"), TIMER.overtimeBeepIntervalMs);
+    flashInterval = setInterval(() => invoke("flash_window"), TIMER.flashIntervalMs);
+  }
 
   function onStartPause() {
     if (state === "stopped") {
       if (inputMinutes <= 0) return;
+      stopOvertime();
       timer.setDuration(inputMinutes);
       timer.start();
     } else if (state === "running") {
@@ -50,11 +71,13 @@
   }
 
   function onReset() {
+    stopOvertime();
     timer.stop();
   }
 
   function onFinished() {
     state = timer.state;
+    startOvertime();
   }
 
   function onTick(rm: number, _em: number) {
@@ -74,36 +97,41 @@
 
   $effect(() => {
     return () => {
+      stopOvertime();
       timer.destroy();
     };
   });
 </script>
 
 <div class="widget">
-  <div class="ring-container">
-    <CircularProgress {progress} color={ringColor} />
-    <div class="time-overlay">
-      <TimerDisplay time={displayTime} isOvertime={isOvertime} />
-    </div>
-  </div>
+  <div class="drag-strip" data-tauri-drag-region></div>
 
-  <div class="controls">
-    <div class="input-row">
-      <input
-        type="number"
-        min="0.1"
-        step="1"
-        bind:value={inputMinutes}
-        disabled={state !== "stopped"}
-        class="minutes-input"
-        style="border-color: {inputBorderColor};"
-      />
-      <span class="unit">min</span>
+  <div class="content">
+    <div class="ring-container">
+      <CircularProgress {progress} color={ringColor} />
+      <div class="time-overlay">
+        <TimerDisplay time={displayTime} isOvertime={isOvertime} />
+      </div>
     </div>
 
-    <div class="buttons">
-      <StartPauseButton {state} onclick={onStartPause} />
-      <ResetButton onclick={onReset} />
+    <div class="controls">
+      <div class="input-row">
+        <input
+          type="number"
+          min="0.1"
+          step="1"
+          bind:value={inputMinutes}
+          disabled={state !== "stopped"}
+          class="minutes-input"
+          style="border-color: {inputBorderColor};"
+        />
+        <span class="unit">min</span>
+      </div>
+
+      <div class="buttons">
+        <StartPauseButton {state} onclick={onStartPause} />
+        <ResetButton onclick={onReset} />
+      </div>
     </div>
   </div>
 </div>
@@ -113,10 +141,25 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 16px;
-    padding: 16px;
     background: #1f1f1f;
     border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .drag-strip {
+    width: 100%;
+    height: 6px;
+    background: #333333;
+    cursor: grab;
+    flex-shrink: 0;
+  }
+
+  .content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    padding: 16px 24px 20px;
   }
 
   .ring-container {

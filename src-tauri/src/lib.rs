@@ -1,42 +1,45 @@
 use tauri::Manager;
+use windows::Win32::Foundation::COLORREF;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FlashWindowEx, FlashwInfo, FLASHWINFO, FLASHW_ALL, FLASHW_TIMERNOFG,
-    GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
-    SetLayeredWindowAttributes, LWA_ALPHA,
+    FlashWindowEx, FLASHWINFO, FLASHW_ALL, FLASHW_TIMERNOFG,
+    GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WINDOW_EX_STYLE,
+    WS_EX_LAYERED, WS_EX_TRANSPARENT, SetLayeredWindowAttributes, LWA_ALPHA,
 };
 
-fn hwnd(window: &tauri::Window) -> HWND {
-    HWND(window.hwnd() as isize)
+fn hwnd(window: &tauri::WebviewWindow) -> HWND {
+    window.hwnd().unwrap()
 }
 
 #[tauri::command]
-fn set_click_through(window: tauri::Window, enabled: bool) {
+fn set_click_through(window: tauri::WebviewWindow, enabled: bool) {
     let h = hwnd(&window);
     let current = unsafe { GetWindowLongW(h, GWL_EXSTYLE) };
+    let current = WINDOW_EX_STYLE(current as u32);
     let new = if enabled {
-        current | WS_EX_TRANSPARENT as i32
+        current | WS_EX_TRANSPARENT
     } else {
-        current & !(WS_EX_TRANSPARENT as i32)
+        current & !WS_EX_TRANSPARENT
     };
     unsafe {
-        SetWindowLongW(h, GWL_EXSTYLE, new);
+        SetWindowLongW(h, GWL_EXSTYLE, new.0 as i32);
     }
 }
 
 #[tauri::command]
-fn set_opacity(window: tauri::Window, opacity: f64) {
+fn set_opacity(window: tauri::WebviewWindow, opacity: f64) {
     let h = hwnd(&window);
     let current = unsafe { GetWindowLongW(h, GWL_EXSTYLE) };
-    let layered = current | WS_EX_LAYERED as i32;
+    let current = WINDOW_EX_STYLE(current as u32);
+    let layered = current | WS_EX_LAYERED;
     unsafe {
-        SetWindowLongW(h, GWL_EXSTYLE, layered);
-        SetLayeredWindowAttributes(h, 0, (opacity * 255.0) as u8, LWA_ALPHA);
+        SetWindowLongW(h, GWL_EXSTYLE, layered.0 as i32);
+        let _ = SetLayeredWindowAttributes(h, COLORREF(0), (opacity * 255.0) as u8, LWA_ALPHA);
     }
 }
 
 #[tauri::command]
-fn flash_window(window: tauri::Window) {
+fn flash_window(window: tauri::WebviewWindow) {
     let h = hwnd(&window);
     let info = FLASHWINFO {
         cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
@@ -46,15 +49,16 @@ fn flash_window(window: tauri::Window) {
         dwTimeout: 0,
     };
     unsafe {
-        FlashWindowEx(&info);
+        let _ = FlashWindowEx(&info);
     }
 }
 
 #[tauri::command]
 fn beep_system() {
-    unsafe {
-        windows::Win32::UI::WindowsAndMessaging::Beep(800, 50);
-    }
+    std::process::Command::new("powershell")
+        .args(["-c", "[console]::beep(800,50)"])
+        .spawn()
+        .ok();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -73,9 +77,10 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let h = hwnd(&window);
                 let current = unsafe { GetWindowLongW(h, GWL_EXSTYLE) };
-                let layered = current | WS_EX_LAYERED as i32;
+                let current = WINDOW_EX_STYLE(current as u32);
+                let layered = current | WS_EX_LAYERED;
                 unsafe {
-                    SetWindowLongW(h, GWL_EXSTYLE, layered);
+                    SetWindowLongW(h, GWL_EXSTYLE, layered.0 as i32);
                 }
             }
 

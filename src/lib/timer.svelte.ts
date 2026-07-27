@@ -16,6 +16,7 @@ export class TimerModel {
   private _intervalId: ReturnType<typeof setInterval> | null = null;
   private _lastTickTime: number = 0;
   private _callbacks: TimerCallbacks = {};
+  private _hasFinished: boolean = false;
 
   get state(): TimerState {
     return this._state;
@@ -72,6 +73,7 @@ export class TimerModel {
     this._durationMs = Math.max(0, Math.round(minutes * 60000));
     this._remainingMs = this._durationMs;
     this._elapsedMs = 0;
+    this._hasFinished = false;
     this._emitTick();
   }
 
@@ -80,6 +82,7 @@ export class TimerModel {
     this._state = "running";
     this._remainingMs = this._durationMs;
     this._elapsedMs = 0;
+    this._hasFinished = false;
     this._lastTickTime = performance.now();
     this._startInterval();
     this._emitTick();
@@ -108,6 +111,7 @@ export class TimerModel {
     this._stopInterval();
     this._remainingMs = this._durationMs;
     this._elapsedMs = 0;
+    this._hasFinished = false;
     this._emitTick();
     this._emitState();
   }
@@ -145,10 +149,8 @@ export class TimerModel {
 
     this._emitTick();
 
-    if (this._remainingMs <= 0 && this._elapsedMs >= this._durationMs) {
-      this._state = "stopped";
-      this._stopInterval();
-      this._emitState();
+    if (!this._hasFinished && this._remainingMs <= 0) {
+      this._hasFinished = true;
       this._callbacks.onFinished?.();
     }
   }
