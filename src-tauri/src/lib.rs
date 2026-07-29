@@ -63,17 +63,31 @@ fn beep_system() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
+        .invoke_handler(tauri::generate_handler![
+            set_click_through,
+            set_opacity,
+            flash_window,
+            beep_system,
+        ]);
 
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.plugin(tauri_plugin_mcp::init_with_config(
+            tauri_plugin_mcp::PluginConfig::new("Timers-v2".to_string())
+                .start_socket_server(true)
+                .socket_path("/tmp/tauri-mcp.sock".into()),
+        ));
+    }
+
+    builder
+        .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 let h = hwnd(&window);
                 let current = unsafe { GetWindowLongW(h, GWL_EXSTYLE) };
@@ -86,12 +100,9 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            set_click_through,
-            set_opacity,
-            flash_window,
-            beep_system,
-        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests;
