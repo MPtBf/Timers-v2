@@ -14,15 +14,11 @@
     "windows": [
       {
         "title": "Timers-v2",
-        "width": 320,
-        "height": 260,
-        "minWidth": 280,
-        "minHeight": 220,
+        "width": 140,
+        "height": 120,
         "resizable": false,
         "fullscreen": false,
         "decorations": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
         "transparent": true,
         "center": true
       }

@@ -12,11 +12,7 @@ body {
   height: 100%;
   overflow: hidden;
   background: transparent;
-  font-family:
-    system-ui,
-    "Segoe UI",
-    Roboto,
-    sans-serif;
+  font-family: "Segoe UI", sans-serif;
   -webkit-user-select: none;
   user-select: none;
 }
