@@ -18,7 +18,18 @@
 
   let progress = $derived(durationMs > 0 ? 1 - remainingMs / durationMs : 0);
   let isOvertime = $derived(remainingMs < 0);
-  let displayTime = $derived(timer.formattedTime);
+  function formatTime(ms: number): string {
+    const abs = Math.abs(ms);
+    const totalSec = Math.floor(abs / 1000);
+    const msec = Math.floor((abs % 1000) / 10);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    const sign = ms < 0 ? "-" : "";
+    if (h > 0) return `${sign}${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+    return `${sign}${m}:${s.toString().padStart(2, "0")}.${msec.toString().padStart(2, "0")}`;
+  }
+  let displayTime = $derived(formatTime(remainingMs));
   let ringColor = $derived(
     isOvertime
       ? COLORS.ringOvertime
