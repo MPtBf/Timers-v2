@@ -10,15 +10,12 @@
     if (shiftHeld && mouseOver) {
       invoke("set_opacity", { opacity: 0.0 });
       invoke("set_click_through", { enabled: true });
-      isClickThrough = true;
     } else if (ctrlHeld && mouseOver) {
       invoke("set_opacity", { opacity: 1.0 });
       invoke("set_click_through", { enabled: false });
-      isClickThrough = false;
     } else {
       invoke("set_opacity", { opacity: 0.5 });
       invoke("set_click_through", { enabled: true });
-      isClickThrough = true;
     }
   }
 
