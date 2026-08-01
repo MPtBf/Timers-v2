@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import {
     COLOR_STOPPED, COLOR_RUNNING, COLOR_PAUSED, OVERTIME_COLOR,
     RING_BG, RING_FG, CTRL_BTN_SPACING, TIMER, SESSION,
   } from "../constants";
   import { TimerModel, type TimerState } from "./timer.svelte";
   import { formatClockTime } from "./format";
+  import { getIdleTime, beepSystem, flashWindow } from "./ipc";
   import type { TimerStateReport } from "./session";
 
   let { soundOn = true, onOvertimeChange, initial = null, onStateReport }: {
@@ -64,12 +64,19 @@
     if (flashInterval !== null) { clearInterval(flashInterval); flashInterval = null; }
   }
 
+  function maybeBeep() {
+    if (!soundOn) return;
+    getIdleTime().then((idleMs) => {
+      if (idleMs < TIMER.afkMuteMs) beepSystem();
+    });
+  }
+
   function startOvertime() {
     stopOvertime();
-    if (soundOn) invoke("beep_system");
-    invoke("flash_window");
-    beepInterval = setInterval(() => { if (soundOn) invoke("beep_system"); }, TIMER.overtimeBeepIntervalMs);
-    flashInterval = setInterval(() => invoke("flash_window"), TIMER.flashIntervalMs);
+    maybeBeep();
+    flashWindow();
+    beepInterval = setInterval(maybeBeep, TIMER.overtimeBeepIntervalMs);
+    flashInterval = setInterval(() => flashWindow(), TIMER.flashIntervalMs);
     isFinished = true;
     onOvertimeChange?.(true);
     reportNow();

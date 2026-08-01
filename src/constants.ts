@@ -42,6 +42,7 @@ export const TIMER = {
   overtimeBeepDurationMs: 50,
   overtimeBeepFreq: 800,
   flashIntervalMs: 5000,
+  afkMuteMs: 60000,
 };
 
 export const SESSION = {

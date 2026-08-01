@@ -130,6 +130,20 @@ fn get_modifier_state() -> (bool, bool) {
 }
 
 #[tauri::command]
+fn get_idle_time() -> u64 {
+    let mut lii = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    if unsafe { GetLastInputInfo(&mut lii) }.as_bool() {
+        let now = unsafe { GetTickCount() };
+        now.wrapping_sub(lii.dwTime) as u64
+    } else {
+        0
+    }
+}
+
+#[tauri::command]
 fn get_cursor_pos() -> (i32, i32) {
     let mut pt = POINT { x: 0, y: 0 };
     unsafe { let _ = GetCursorPos(&mut pt); }
@@ -366,6 +380,7 @@ pub fn run() {
             flash_window,
             beep_system,
             get_modifier_state,
+            get_idle_time,
             get_cursor_pos,
             create_timer_window,
             get_timer_init,

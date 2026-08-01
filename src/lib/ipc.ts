@@ -29,6 +29,10 @@ export async function getCursorPos(): Promise<[number, number]> {
   return await invoke<[number, number]>("get_cursor_pos");
 }
 
+export async function getIdleTime(): Promise<number> {
+  return await invoke<number>("get_idle_time");
+}
+
 export async function createTimerWindow(snapshot: TimerSnapshot): Promise<void> {
   await invoke("create_timer_window", { snapshot });
 }
