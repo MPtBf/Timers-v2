@@ -61,12 +61,12 @@ export async function muteAll(muted: boolean): Promise<void> {
   await invoke("mute_all", { muted });
 }
 
-export async function closeTimer(id: number): Promise<void> {
-  await invoke("close_timer", { id });
+export async function closeTimer(id: number): Promise<boolean> {
+  return await invoke<boolean>("close_timer", { id });
 }
 
-export async function focusTimer(id: number): Promise<void> {
-  await invoke("focus_timer", { id });
+export async function focusTimer(id: number): Promise<boolean> {
+  return await invoke<boolean>("focus_timer", { id });
 }
 
 export async function saveSession(json: string): Promise<void> {

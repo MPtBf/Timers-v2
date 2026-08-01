@@ -128,7 +128,7 @@
 
   $effect(() => {
     const unlistenPromise = listen<boolean>(EVT_MUTE_ALL, (e) => {
-      soundOn = e.payload;
+      soundOn = !e.payload;
       reportSnapshot();
     });
     const unlistenPinPromise = listen<boolean>(EVT_PIN_ALL, (e) => {

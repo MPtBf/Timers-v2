@@ -188,11 +188,12 @@ fn beep_system() {
 }
 
 #[tauri::command]
-fn create_timer_window(app: tauri::AppHandle, snapshot: TimerSnapshot, state: State<PendingInit>) -> Result<(), String> {
+async fn create_timer_window(app: tauri::AppHandle, snapshot: TimerSnapshot, state: State<'_, PendingInit>) -> Result<(), String> {
     let label = format!("{TIMER_PREFIX}{}", snapshot.id);
     if app.get_webview_window(&label).is_some() {
         return Ok(());
     }
+    state.0.lock().unwrap().insert(label.clone(), snapshot.clone());
     let url = WebviewUrl::App(format!("index.html?timer={}", snapshot.id).into());
     let win = WebviewWindowBuilder::new(&app, label.clone(), url)
         .title("Timer")
@@ -205,11 +206,12 @@ fn create_timer_window(app: tauri::AppHandle, snapshot: TimerSnapshot, state: St
         .decorations(false)
         .transparent(true)
         .always_on_top(snapshot.pinned)
-        .skip_taskbar(true)
+        .skip_taskbar(false)
         .build()
-        .map_err(|e| e.to_string())?;
-
-    state.0.lock().unwrap().insert(label.clone(), snapshot.clone());
+        .map_err(|e| {
+            eprintln!("create_timer_window build error: {e:?}");
+            e.to_string()
+        })?;
 
     let id_for_event = snapshot.id;
     let hub = app.get_webview_window(HUB_LABEL);
@@ -267,19 +269,25 @@ fn mute_all(app: tauri::AppHandle, muted: bool) {
 }
 
 #[tauri::command]
-fn close_timer(app: tauri::AppHandle, id: u32) {
+fn close_timer(app: tauri::AppHandle, id: u32) -> bool {
     let label = format!("{TIMER_PREFIX}{id}");
     if let Some(win) = app.get_webview_window(&label) {
         let _ = win.close();
+        true
+    } else {
+        false
     }
 }
 
 #[tauri::command]
-fn focus_timer(app: tauri::AppHandle, id: u32) {
+fn focus_timer(app: tauri::AppHandle, id: u32) -> bool {
     let label = format!("{TIMER_PREFIX}{id}");
     if let Some(win) = app.get_webview_window(&label) {
         let _ = win.show();
         let _ = win.set_focus();
+        true
+    } else {
+        false
     }
 }
 

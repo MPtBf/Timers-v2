@@ -16,6 +16,7 @@
 
   let timers = $state<TimerSnapshot[]>([]);
   let saveTimer: ReturnType<typeof setTimeout> | undefined = $state(undefined);
+  let uiError = $state<string | null>(null);
 
   function saveNow(): Promise<void> {
     return saveSession(serializeSession(timers));
@@ -47,22 +48,28 @@
   }
 
   async function newTimer() {
-    const pos = await getCurrentWindow().outerPosition();
-    const count = timers.length;
-    const snap: TimerSnapshot = {
-      id: nextId(),
-      durationMs: 5 * 60000,
-      remainingMs: 5 * 60000,
-      state: "stopped",
-      soundOn: true,
-      pinned: false,
-      x: pos.x + SESSION.newTimerCascadeOffset + (count % 8) * SESSION.newTimerCascadeStep,
-      y: pos.y + SESSION.newTimerCascadeOffset + (count % 8) * SESSION.newTimerCascadeStep,
-      w: WINDOW_WIDTH,
-      h: WINDOW_HEIGHT,
-    };
-    await createTimerWindow(snap);
-    upsert(snap);
+    try {
+      const pos = await getCurrentWindow().outerPosition();
+      const count = timers.length;
+      const snap: TimerSnapshot = {
+        id: nextId(),
+        durationMs: 5 * 60000,
+        remainingMs: 5 * 60000,
+        state: "stopped",
+        soundOn: true,
+        pinned: false,
+        x: pos.x + SESSION.newTimerCascadeOffset + (count % 8) * SESSION.newTimerCascadeStep,
+        y: pos.y + SESSION.newTimerCascadeOffset + (count % 8) * SESSION.newTimerCascadeStep,
+        w: WINDOW_WIDTH,
+        h: WINDOW_HEIGHT,
+      };
+      await createTimerWindow(snap);
+      upsert(snap);
+      uiError = null;
+    } catch (err) {
+      uiError = String(err);
+      console.error("newTimer error:", err);
+    }
   }
 
   async function quit() {
@@ -76,6 +83,14 @@
   function onUnmuteAll() { muteAll(false); }
   function onPinAll() { setTimersAlwaysOnTop(true); }
   function onUnpinAll() { setTimersAlwaysOnTop(false); }
+
+  function onFocusTimer(id: number) {
+    focusTimer(id).then((found) => { if (!found) remove(id); });
+  }
+
+  function onCloseTimer(id: number) {
+    closeTimer(id).then((found) => { if (!found) remove(id); });
+  }
 
   function stateColor(s: TimerState): string {
     return s === "running" ? COLOR_RUNNING : s === "paused" ? COLOR_PAUSED : COLOR_STOPPED;
@@ -94,7 +109,7 @@
       if (!snapshots || snapshots.length === 0) return;
       timers = snapshots;
       for (const s of snapshots) {
-        createTimerWindow(s).catch((err) => console.error("createTimerWindow error:", err));
+        createTimerWindow(s).catch(() => remove(s.id));
       }
     });
     return () => {
@@ -125,7 +140,7 @@
   <ul class="list">
     {#each timers as t (t.id)}
       <li class="row-wrap">
-        <button class="row" type="button" onclick={() => focusTimer(t.id)}>
+        <button class="row" type="button" onclick={() => onFocusTimer(t.id)}>
           <span class="state-dot" style="background: {stateColor(t.state)};"></span>
           <span class="state-label" style="color: {t.state === "stopped" ? TEXT_DIM : stateColor(t.state)};">{t.state}</span>
           <span class="time">{formatClockTime(t.remainingMs)}</span>
@@ -135,7 +150,7 @@
           class="row-close"
           type="button"
           title="Close timer"
-          onclick={() => closeTimer(t.id)}
+          onclick={() => onCloseTimer(t.id)}
         >✕</button>
       </li>
     {:else}
@@ -144,7 +159,10 @@
   </ul>
 
   <footer>
-    <button class="quit-btn" onclick={quit}>Quit all</button>
+    {#if uiError}
+      <div class="error" title={uiError}>{uiError}</div>
+    {/if}
+    <button class="quit-btn" onclick={quit}>Quit totally</button>
   </footer>
 </div>
 
@@ -285,6 +303,12 @@
     padding: 6px 8px;
     border-top: 1px solid var(--border);
     flex-shrink: 0;
+  }
+  .error {
+    color: var(--overtime);
+    font-size: 10px;
+    margin-bottom: 4px;
+    word-break: break-all;
   }
   .quit-btn {
     width: 100%;
