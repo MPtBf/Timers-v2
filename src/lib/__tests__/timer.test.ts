@@ -265,6 +265,51 @@ describe("TimerModel", () => {
     });
   });
 
+  describe("restore", () => {
+    it("restores stopped state with duration and remaining", () => {
+      timer.restore(300000, 180000, "stopped");
+      expect(timer.durationMs).toBe(300000);
+      expect(timer.remainingMs).toBe(180000);
+      expect(timer.elapsedMs).toBe(120000);
+      expect(timer.state).toBe("stopped");
+    });
+
+    it("restores running state and starts ticking", () => {
+      timer.restore(300000, 180000, "running");
+      expect(timer.state).toBe("running");
+      const before = timer.remainingMs;
+      advanceTime(1000);
+      expect(timer.remainingMs).toBeLessThan(before);
+    });
+
+    it("restores paused state without ticking", () => {
+      timer.restore(300000, 180000, "paused");
+      expect(timer.state).toBe("paused");
+      const before = timer.remainingMs;
+      advanceTime(1000);
+      expect(timer.remainingMs).toBe(before);
+    });
+
+    it("marks finished when restored with non-positive remaining", () => {
+      const onFinished = vi.fn();
+      timer.on({ onFinished });
+      timer.restore(300000, -5000, "running");
+      expect(timer.isOvertime).toBe(true);
+      advanceTime(1000);
+      expect(onFinished).not.toHaveBeenCalled();
+    });
+
+    it("clamps negative elapsed time", () => {
+      timer.restore(300000, 400000, "stopped");
+      expect(timer.elapsedMs).toBe(0);
+    });
+
+    it("clamps non-positive duration to zero", () => {
+      timer.restore(-100, 0, "stopped");
+      expect(timer.durationMs).toBe(0);
+    });
+  });
+
   describe("off", () => {
     it("clears all callbacks", () => {
       const onTick = vi.fn();

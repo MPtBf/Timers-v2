@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { mockIPC } from "@tauri-apps/api/mocks";
-import { setClickThrough, setOpacity, flashWindow, beepSystem } from "../ipc";
+import {
+  setClickThrough, setOpacity, flashWindow, beepSystem,
+  createTimerWindow, saveSession, hideTimers, closeTimer,
+} from "../ipc";
+import type { TimerSnapshot } from "../session";
 
 describe("IPC wrappers", () => {
   let calls: Array<[string, unknown]>;
@@ -36,6 +40,38 @@ describe("IPC wrappers", () => {
   it("beepSystem sends command with no args", async () => {
     await beepSystem();
     expect(calls[0][0]).toBe("beep_system");
+  });
+
+  it("createTimerWindow sends snapshot payload", async () => {
+    const snapshot: TimerSnapshot = {
+      id: 1,
+      durationMs: 300000,
+      remainingMs: 300000,
+      state: "stopped",
+      soundOn: true,
+      pinned: false,
+      x: 10,
+      y: 20,
+      w: 95,
+      h: 96,
+    };
+    await createTimerWindow(snapshot);
+    expect(calls[0]).toEqual(["create_timer_window", { snapshot }]);
+  });
+
+  it("saveSession sends json string", async () => {
+    await saveSession('{"version":1}');
+    expect(calls[0]).toEqual(["save_session", { json: '{"version":1}' }]);
+  });
+
+  it("hideTimers sends command with no args", async () => {
+    await hideTimers();
+    expect(calls[0][0]).toBe("hide_timers");
+  });
+
+  it("closeTimer sends id", async () => {
+    await closeTimer(4);
+    expect(calls[0]).toEqual(["close_timer", { id: 4 }]);
   });
 
   it("rejects on unknown command", async () => {
