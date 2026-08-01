@@ -13,13 +13,14 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Timers-v2",
-        "width": 140,
-        "height": 120,
-        "resizable": false,
+        "label": "hub",
+        "title": "Timers",
+        "width": 300,
+        "height": 380,
+        "resizable": true,
         "fullscreen": false,
-        "decorations": false,
-        "transparent": true,
+        "decorations": true,
+        "transparent": false,
         "center": true
       }
     ],
