@@ -120,6 +120,24 @@ export class TimerModel {
     this.stop();
   }
 
+  restore(durationMs: number, remainingMs: number, state: "stopped" | "running" | "paused"): void {
+    this.stop();
+    this._durationMs = Math.max(0, Math.round(durationMs));
+    this._remainingMs = Math.round(remainingMs);
+    this._elapsedMs = Math.max(0, this._durationMs - this._remainingMs);
+    this._hasFinished = this._remainingMs <= 0;
+    this._emitTick();
+    if (state === "running") {
+      this._state = "running";
+      this._lastTickTime = performance.now();
+      this._startInterval();
+      this._emitState();
+    } else if (state === "paused") {
+      this._state = "paused";
+      this._emitState();
+    }
+  }
+
   destroy(): void {
     this._stopInterval();
     this._callbacks = {};

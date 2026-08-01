@@ -1,13 +1,19 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import {
-    BG_PANEL, TEXT_COLOR, COLOR_STOPPED, COLOR_RUNNING, COLOR_PAUSED, OVERTIME_COLOR,
-    RING_BG, RING_WIDTH, TIME_FONT_SIZE, SPIN_FONT_SIZE, CTRL_BTN_SPACING,
-    TIMER,
+    COLOR_STOPPED, COLOR_RUNNING, COLOR_PAUSED, OVERTIME_COLOR,
+    RING_BG, RING_FG, CTRL_BTN_SPACING, TIMER, SESSION,
   } from "../constants";
   import { TimerModel, type TimerState } from "./timer.svelte";
+  import { formatClockTime } from "./format";
+  import type { TimerStateReport } from "./session";
 
-  let { soundOn = true }: { soundOn?: boolean } = $props();
+  let { soundOn = true, onOvertimeChange, initial = null, onStateReport }: {
+    soundOn?: boolean;
+    onOvertimeChange?: (expired: boolean) => void;
+    initial?: TimerStateReport | null;
+    onStateReport?: (report: TimerStateReport) => void;
+  } = $props();
 
   let state: TimerState = $state("stopped");
   let remainingMs: number = $state(0);
@@ -18,47 +24,40 @@
   let isFinished = $state(false);
   let beepInterval: ReturnType<typeof setInterval> | null = $state(null);
   let flashInterval: ReturnType<typeof setInterval> | null = $state(null);
+  let lastReport: number = $state(0);
 
   let progress = $derived(durationMs > 0 ? 1 - remainingMs / durationMs : 0);
-  let ringColor = $derived(
+  let timeColor = $derived(
     isFinished ? OVERTIME_COLOR
       : state === "running" ? COLOR_RUNNING
         : state === "paused" ? COLOR_PAUSED
           : COLOR_STOPPED
   );
-
-  function formatTime(ms: number): string {
-    const abs = Math.abs(ms);
-    const totalSec = Math.floor(abs / 1000);
-    const m = Math.floor(totalSec / 60);
-    const s = totalSec % 60;
-    const sign = ms < 0 ? "-" : "";
-    return `${sign}${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
-  }
+  let ringProgressColor = $derived(
+    isFinished ? OVERTIME_COLOR
+      : state === "paused" ? COLOR_PAUSED
+        : RING_FG
+  );
+  let ringProgress = $derived(isFinished ? 1.0 : progress);
 
   let displayTime = $derived(
     isFinished
-      ? formatTime(-remainingMs)
+      ? formatClockTime(-remainingMs)
       : state === "stopped"
-        ? formatTime(inputMinutes * 60000)
-        : formatTime(remainingMs)
+        ? formatClockTime(durationMs > 0 ? durationMs : inputMinutes * 60000)
+        : formatClockTime(remainingMs)
   );
-  let timeColor = $derived(ringColor);
-  let ringProgress = $derived(isFinished ? 1.0 : progress);
 
-  // Button visibility
   let btnStartVisible = $derived(!isFinished && state === "stopped");
   let btnPauseVisible = $derived(!isFinished && state === "running");
   let btnResumeVisible = $derived(!isFinished && state === "paused");
   let btnStopVisible = $derived(state === "running" || state === "paused" || isFinished);
   let btnRestartVisible = $derived(state === "running" || state === "paused" || isFinished);
 
-  // SVG ring geometry
-  let ringSvgSize = 60;
-  let ringCx = ringSvgSize / 2;
-  let ringR = 25;
-  let ringCircumference = 2 * Math.PI * ringR;
-  let ringOffset = $derived(ringCircumference * (1 - ringProgress));
+  function reportNow() {
+    lastReport = performance.now();
+    onStateReport?.({ durationMs: timer.durationMs, remainingMs, state });
+  }
 
   function stopOvertime() {
     if (beepInterval !== null) { clearInterval(beepInterval); beepInterval = null; }
@@ -67,28 +66,41 @@
 
   function startOvertime() {
     stopOvertime();
-    invoke("beep_system");
+    if (soundOn) invoke("beep_system");
     invoke("flash_window");
     beepInterval = setInterval(() => { if (soundOn) invoke("beep_system"); }, TIMER.overtimeBeepIntervalMs);
     flashInterval = setInterval(() => invoke("flash_window"), TIMER.flashIntervalMs);
     isFinished = true;
+    onOvertimeChange?.(true);
+    reportNow();
   }
 
   function onStart() {
     if (inputMinutes <= 0) return;
     isFinished = false;
     stopOvertime();
+    onOvertimeChange?.(false);
     timer.setDuration(inputMinutes);
     timer.start();
+    reportNow();
   }
 
-  function onPause() { timer.pause(); }
-  function onResume() { timer.resume(); }
+  function onPause() {
+    timer.pause();
+    reportNow();
+  }
+
+  function onResume() {
+    timer.resume();
+    reportNow();
+  }
 
   function onStop() {
     isFinished = false;
     stopOvertime();
+    onOvertimeChange?.(false);
     timer.stop();
+    reportNow();
   }
 
   function onRestart() { onStop(); onStart(); }
@@ -96,12 +108,25 @@
   function onTick(rm: number, _em: number) {
     remainingMs = rm;
     durationMs = timer.durationMs;
+    if (performance.now() - lastReport >= SESSION.snapshotIntervalMs) reportNow();
   }
 
   function onStateChange(s: TimerState) { state = s; }
   function onFinished() { startOvertime(); }
 
   timer.on({ onTick, onStateChange, onFinished });
+
+  let restored = false;
+  $effect(() => {
+    if (initial && !restored) {
+      restored = true;
+      inputMinutes = Number((initial.durationMs / 60000).toFixed(1));
+      isFinished = initial.remainingMs <= 0;
+      timer.restore(initial.durationMs, initial.remainingMs, initial.state);
+      if (isFinished) startOvertime();
+      reportNow();
+    }
+  });
 
   $effect(() => {
     return () => { stopOvertime(); timer.destroy(); };
@@ -115,86 +140,99 @@
       min="0.1"
       step="1"
       bind:value={inputMinutes}
-      disabled={state !== "stopped"}
       class="spinbox"
-      style="font-size: {SPIN_FONT_SIZE}px; background: {BG_PANEL}; color: {TEXT_COLOR};"
       onkeydown={(e) => { if (e.key === "Enter") onRestart(); }}
     />
   </div>
 
-  <div class="ring-container" style="width: {ringSvgSize}px; height: {ringSvgSize}px;">
-    <svg class="ring" viewBox="0 0 {ringSvgSize} {ringSvgSize}">
-      <circle cx={ringCx} cy={ringCx} r={ringR} fill="none" stroke={RING_BG}
-        stroke-width={RING_WIDTH} />
-      <circle cx={ringCx} cy={ringCx} r={ringR} fill="none"
-        stroke={isFinished ? OVERTIME_COLOR : ringColor}
-        stroke-width={RING_WIDTH}
+  <div class="ring-container">
+      <svg class="ring" viewBox="0 0 120 120">
+      <circle cx="60" cy="60" r="85" fill="none" stroke={RING_BG} stroke-width="54" />
+      <circle cx="60" cy="60" r="85" fill="none"
+        stroke={ringProgressColor}
+        stroke-width="54"
         stroke-linecap="butt"
-        stroke-dasharray={ringCircumference}
-        stroke-dashoffset={ringOffset}
+        stroke-dasharray={2 * Math.PI * 85}
+        stroke-dashoffset={2 * Math.PI * 85 * (1 - ringProgress)}
         style="transition: stroke-dashoffset 33ms linear, stroke 150ms ease;"
       />
     </svg>
-    <span class="time" style="color: {timeColor}; font-size: {TIME_FONT_SIZE}px;">
-      {displayTime}
-    </span>
+    <span class="time" style="color: {timeColor};">{displayTime}</span>
   </div>
 
   <div class="buttons" style="gap: {CTRL_BTN_SPACING}px;">
-    <button class="ctrl-btn" class:visible={btnStartVisible} onclick={onStart}
-      style="background: {BG_PANEL}; color: {TEXT_COLOR};">▶</button>
-    <button class="ctrl-btn" class:visible={btnPauseVisible} onclick={onPause}
-      style="background: {BG_PANEL}; color: {TEXT_COLOR};">⏸</button>
-    <button class="ctrl-btn" class:visible={btnResumeVisible} onclick={onResume}
-      style="background: {BG_PANEL}; color: {TEXT_COLOR};">⏯</button>
-    <button class="ctrl-btn" class:visible={btnStopVisible} onclick={onStop}
-      style="background: {BG_PANEL}; color: {TEXT_COLOR};">⏹</button>
-    <button class="ctrl-btn" class:visible={btnRestartVisible} onclick={onRestart}
-      style="background: {BG_PANEL}; color: {TEXT_COLOR};">🔁</button>
+    <button class="ctrl-btn" class:visible={btnStartVisible} onclick={onStart}>▶</button>
+    <button class="ctrl-btn" class:visible={btnPauseVisible} onclick={onPause}>⏸</button>
+    <button class="ctrl-btn" class:visible={btnResumeVisible} onclick={onResume}>⏯</button>
+    <button class="ctrl-btn" class:visible={btnStopVisible} onclick={onStop}>⏹</button>
+    <button class="ctrl-btn" class:visible={btnRestartVisible} onclick={onRestart}>🔁</button>
   </div>
 </div>
 
 <style>
   .timer-widget {
-    padding: 0;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 0;
+    align-items: stretch;
+    width: 100%;
+    height: 100%;
   }
-  .spin-row { padding: 0; }
-  .spinbox {
-    width: auto;
+  .spin-row {
+    width: 100%;
+    flex-shrink: 0;
     padding: 0;
-    text-align: center;
-    border: none;
-    outline: none;
-    font-family: "Segoe UI", sans-serif;
+    margin: -1px 0 0 0;
+    line-height: 0;
   }
-  .spinbox:disabled { opacity: 0.5; }
+  .spinbox {
+    width: 100%;
+    height: 18px;
+    padding: 0 4px;
+    margin: 0;
+    font-size: 10px;
+    text-align: center;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    border: 1px solid #444;
+    border-top: none;
+    border-radius: 0;
+    outline: none;
+    box-sizing: border-box;
+    font-family: "Segoe UI", sans-serif;
+    appearance: textfield;
+    -moz-appearance: textfield;
+  }
   .spinbox::-webkit-inner-spin-button,
   .spinbox::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-  .spinbox[type="number"] { -moz-appearance: textfield; }
+  .spinbox:disabled { opacity: 0.5; }
 
   .ring-container {
     position: relative;
+    width: 100%;
+    flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
+    min-height: 0;
   }
-  .ring { position: absolute; width: 100%; height: 100%; top: 0; left: 0; }
+  .ring { position: absolute; width: 100%; height: 100%; top: 0; left: 0; z-index: 0; }
   .time {
     position: relative;
-    z-index: 1;
+    z-index: 10;
+    font-size: 18px;
     font-weight: bold;
     font-family: "Segoe UI", sans-serif;
     user-select: none;
     line-height: 1;
   }
 
-  .buttons { display: flex; padding: 0; }
+  .buttons { display: flex; width: 100%; flex-shrink: 0; }
   .ctrl-btn {
-    border: 1px solid #444;
+    flex: 1;
+    height: 18px;
+    background: #555555;
+    color: #e0e0e0;
+    border: none;
     border-radius: 0;
     padding: 0;
     font-size: 10px;
@@ -202,9 +240,9 @@
     cursor: pointer;
     line-height: 1;
     display: none;
-    width: auto;
-    height: auto;
+    align-items: center;
+    justify-content: center;
   }
-  .ctrl-btn.visible { display: inline-flex; align-items: center; justify-content: center; }
-  .ctrl-btn:hover { background: #333 !important; }
+  .ctrl-btn.visible { display: flex; }
+  .ctrl-btn:hover { background: #777777; }
 </style>

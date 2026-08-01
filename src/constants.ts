@@ -1,10 +1,18 @@
 export const WINDOW_WIDTH = 95;
 export const WINDOW_HEIGHT = 96;
 
+export const HUB_WIDTH = 300;
+export const HUB_HEIGHT = 380;
+
 export const BG_WINDOW = "#1a1a1a";
 export const BG_PANEL = "#222222";
 export const BORDER_COLOR = "#3a3a3a";
 export const TEXT_COLOR = "#e0e0e0";
+export const TEXT_DIM = "#888888";
+export const BTN_BG = "#555555";
+export const BTN_HOVER = "#777777";
+export const ACCENT_BG = "#2a4a6a";
+export const ACCENT_FG = "#6aafef";
 
 export const RING_BG = "#4a9aca";
 export const RING_FG = "#000000";
@@ -26,7 +34,7 @@ export const CTRL_BTN_SPACING = 0;
 export const SIDE_BTN_SIZE = 18;
 export const SIDE_BTN_FONT_SIZE = 9;
 
-export const DRAG_STRIP_WIDTH = 14;
+export const DRAG_STRIP_WIDTH = 18;
 
 export const TIMER = {
   tickIntervalMs: 33,
@@ -34,4 +42,11 @@ export const TIMER = {
   overtimeBeepDurationMs: 50,
   overtimeBeepFreq: 800,
   flashIntervalMs: 5000,
+};
+
+export const SESSION = {
+  snapshotIntervalMs: 5000,
+  saveDebounceMs: 300,
+  newTimerCascadeStep: 24,
+  newTimerCascadeOffset: 40,
 };
