@@ -8,7 +8,7 @@
   } from "../constants";
   import {
     setClickThrough, setOpacity, getModifierState, getCursorPos,
-    applyDwm, getTimerInit,
+    applyDwm, getTimerInit, raiseWindow,
   } from "./ipc";
   import { HUB_LABEL, timerIdFromLabel } from "./windows";
   import { EVT_TIMER_SNAPSHOT, EVT_MUTE_ALL, EVT_PIN_ALL } from "./events";
@@ -64,6 +64,7 @@
       interactive = true;
       setOpacity(1.0);
       setClickThrough(false);
+      raiseWindow();
     } else {
       win.setAlwaysOnTop(pinned);
     }

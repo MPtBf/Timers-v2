@@ -13,6 +13,10 @@ export async function applyDwm(): Promise<void> {
   await invoke("apply_dwm");
 }
 
+export async function raiseWindow(): Promise<void> {
+  await invoke("raise_window");
+}
+
 export async function flashWindow(): Promise<void> {
   await invoke("flash_window");
 }

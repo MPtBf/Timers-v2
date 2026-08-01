@@ -123,6 +123,15 @@ fn apply_dwm(window: tauri::WebviewWindow) {
 }
 
 #[tauri::command]
+fn raise_window(window: tauri::WebviewWindow) {
+    let h = hwnd(&window);
+    unsafe {
+        let _ = SetWindowPos(h, Some(HWND_TOPMOST), 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+#[tauri::command]
 fn get_modifier_state() -> (bool, bool) {
     let ctrl = unsafe { GetAsyncKeyState(0x11) } < 0;
     let shift = unsafe { GetAsyncKeyState(0x10) } < 0;
@@ -377,6 +386,7 @@ pub fn run() {
             set_click_through,
             set_opacity,
             apply_dwm,
+            raise_window,
             flash_window,
             beep_system,
             get_modifier_state,
