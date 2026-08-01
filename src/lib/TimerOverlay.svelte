@@ -99,21 +99,11 @@
         cx >= pos.x && cx < pos.x + size.width &&
         cy >= pos.y && cy < pos.y + size.height
       );
-      if (ctrl !== pollInteraction._lastCtrl || shift !== pollInteraction._lastShift || over !== pollInteraction._lastOver || overtimeActive !== pollInteraction._lastOvertime) {
-        pollInteraction._lastCtrl = ctrl;
-        pollInteraction._lastShift = shift;
-        pollInteraction._lastOver = over;
-        pollInteraction._lastOvertime = overtimeActive;
-        await applyInteraction(ctrl, shift, over);
-      }
+      await applyInteraction(ctrl, shift, over);
     } catch (e) {
       console.error("pollInteraction error:", e);
     }
   }
-  pollInteraction._lastCtrl = false;
-  pollInteraction._lastShift = false;
-  pollInteraction._lastOver = false;
-  pollInteraction._lastOvertime = false;
 
   $effect(() => {
     win.setSize(new LogicalSize(WINDOW_WIDTH, WINDOW_HEIGHT));

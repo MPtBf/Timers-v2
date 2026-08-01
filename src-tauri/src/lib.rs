@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -8,16 +9,17 @@ use tauri::WindowEvent;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use windows::Win32::Foundation::COLORREF;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
 use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY};
 use windows::core::PCWSTR;
+use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::WindowsAndMessaging::{
     FlashWindowEx, FLASHWINFO, FLASHW_ALL, FLASHW_TIMERNOFG,
     GetWindowLongW, SetWindowLongW, SetWindowPos,
-    GWL_EXSTYLE, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_FRAMECHANGED,
+    GWL_EXSTYLE, HWND_BOTTOM, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_NOZORDER, SWP_FRAMECHANGED,
     WINDOW_EX_STYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
     SetLayeredWindowAttributes, LWA_ALPHA,
 };
@@ -46,16 +48,34 @@ struct TimerSnapshot {
 
 struct PendingInit(Mutex<HashMap<String, TimerSnapshot>>);
 
+struct BirthTimes(Mutex<HashMap<String, Instant>>);
+
+const BIRTH_GRACE_MS: u64 = 2000;
+
+fn lower_timers_except(app: &tauri::AppHandle, stay: &str) {
+    for (label, win) in app.webview_windows() {
+        if label != stay && is_timer_label(&label) {
+            let h = hwnd(&win);
+            unsafe {
+                let _ = SetWindowPos(h, Some(HWND_BOTTOM), 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+    }
+}
+
 fn hwnd(window: &tauri::WebviewWindow) -> HWND {
     window.hwnd().unwrap()
 }
 
-fn apply_window_style(h: HWND, style: WINDOW_EX_STYLE, opacity: u8) {
+fn apply_window_style(h: HWND, style: WINDOW_EX_STYLE, opacity: u8, nudge: bool) {
     unsafe {
         SetWindowLongW(h, GWL_EXSTYLE, style.0 as i32);
         let _ = SetLayeredWindowAttributes(h, COLORREF(0), opacity, LWA_ALPHA);
-        let _ = SetWindowPos(h, Some(HWND_TOP), 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        if nudge {
+            let _ = SetWindowPos(h, None, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        }
     }
 }
 
@@ -74,8 +94,9 @@ fn set_click_through(window: tauri::WebviewWindow, enabled: bool) {
         current & !WS_EX_TRANSPARENT
     };
     let layered = new | WS_EX_LAYERED;
+    let nudge = (current & WS_EX_TRANSPARENT) != (new & WS_EX_TRANSPARENT);
     let current_opacity = if enabled { 128 } else { 255 };
-    apply_window_style(h, layered, current_opacity);
+    apply_window_style(h, layered, current_opacity, nudge);
 }
 
 #[tauri::command]
@@ -84,7 +105,7 @@ fn set_opacity(window: tauri::WebviewWindow, opacity: f64) {
     let current = unsafe { GetWindowLongW(h, GWL_EXSTYLE) };
     let current = WINDOW_EX_STYLE(current as u32);
     let layered = current | WS_EX_LAYERED;
-    apply_window_style(h, layered, (opacity * 255.0) as u8);
+    apply_window_style(h, layered, (opacity * 255.0) as u8, false);
 }
 
 #[tauri::command]
@@ -337,6 +358,7 @@ pub fn run() {
                 .build(),
         )
         .manage(PendingInit(Mutex::new(HashMap::new())))
+        .manage(BirthTimes(Mutex::new(HashMap::new())))
         .invoke_handler(tauri::generate_handler![
             set_click_through,
             set_opacity,
@@ -373,10 +395,25 @@ pub fn run() {
 
             if let Some(hub) = app.get_webview_window(HUB_LABEL) {
                 let hub_for_close = hub.clone();
+                let app_handle = app.handle().clone();
+                app.state::<BirthTimes>().0.lock().unwrap().insert(HUB_LABEL.to_string(), Instant::now());
                 hub.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
                         let _ = hub_for_close.hide();
+                    }
+                    if let WindowEvent::Focused(true) = event {
+                        let recent = app_handle
+                            .state::<BirthTimes>()
+                            .0
+                            .lock()
+                            .unwrap()
+                            .get(HUB_LABEL)
+                            .map(|t| t.elapsed().as_millis() < BIRTH_GRACE_MS as u128)
+                            .unwrap_or(false);
+                        if !recent {
+                            lower_timers_except(&app_handle, HUB_LABEL);
+                        }
                     }
                 });
             }
