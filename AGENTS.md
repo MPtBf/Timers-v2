@@ -46,7 +46,9 @@ src-tauri/
 
 > `TimerDisplay.svelte` and `CircularProgress.svelte` are legacy and NOT imported.
 > Timer windows: label `timer-{id}`, 95×96, `decorations:false`, `transparent:true`,
-> `skipTaskbar:true`, always-on-top. Created from Rust via `create_timer_window`.
+> always-on-top only when `pinned` or overtime is active. Created from Rust via
+> `create_timer_window`. Visible in taskbar and Alt-Tab (`skip_taskbar(false)`) so timers are
+> reachable without the hub.
 > Each timer window is its own Svelte instance; `App.svelte` picks the view from `label`.
 
 ## Multi-window / session model
@@ -132,15 +134,18 @@ Rust provides `get_modifier_state` (Ctrl/Shift via `GetAsyncKeyState`) and
 | overtimeActive            | forced       | 1.0     | off           |
 
 - Pure mode logic lives in `src/lib/interaction.ts` (opacity + clickThrough values).
-- Overtime **overrides** all modes: `TimerOverlay.handleOvertimeChange(true)` sets
-  always-on-top + interactive; `false` reverts to `pinned` and normal polling.
+- Overtime **overrides** all modes: `TimerOverlay.handleOvertimeChange(true)` raises the window
+  to the top (`raise_window`, HWND_TOPMOST) + always-on-top + interactive + opacity 1.0 +
+  click-through off; `false` reverts to `pinned` and normal polling. The window stays
+  topmost/interactive/opaque until the timer is stopped.
 - Drag strip works via `getCurrentWindow().startDragging()` on mousedown (needs
   `core:window:allow-start-dragging` permission and interactive mode = Ctrl held).
 
 ## Overtime behavior
 - `TimerModel._hasFinished` fires once when remaining hits 0; remaining goes negative.
 - `TimerWidget.startOvertime()`: beep each `TIMER.overtimeBeepIntervalMs` (1s, respects
-  `soundOn`), flash each `TIMER.flashIntervalMs` (5s), then `onOvertimeChange?.(true)`.
+  `soundOn` AND the AFK gate via `maybeBeep()`), flash each `TIMER.flashIntervalMs` (5s), then
+  `onOvertimeChange?.(true)` → window raised to top, topmost, opaque, interactive.
 - Display: `-M:SS` in red (`OVERTIME_COLOR` `#e74c3c`); ring pinned at 100%, red.
 - On stop/restart: `onOvertimeChange?.(false)` → window reverts (pinned state + polling).
 - Ring SVG (in `TimerWidget`): `viewBox="0 0 120 120"`, circles `cx=60 cy=60 r=85`,
@@ -157,9 +162,26 @@ Rust provides `get_modifier_state` (Ctrl/Shift via `GetAsyncKeyState`) and
 - **MCP plugin**: dev-only, socket `\\.\pipe\tmp\tauri-mcp.sock`. On Windows it needs a
   temporary patch to `client.js` in the npx cache (lost on cache clear).
 - **Transparent window**: set `WS_EX_LAYERED` + `WS_EX_TRANSPARENT` (click-through) +
-  `SetLayeredWindowAttributes`; must call `SetWindowPos` after style changes. DWM shadow
-  removed per timer window via `apply_dwm` command on mount
+  `SetLayeredWindowAttributes`; `SetWindowPos` (None + `SWP_NOZORDER` + `SWP_FRAMECHANGED`) is
+  called ONLY when the `WS_EX_TRANSPARENT` flag changes — never `HWND_TOP`, or the 100ms
+  polling would keep raising timer windows above everything. DWM shadow removed per timer
+  window via `apply_dwm` command on mount
   (`DWMWA_NCRENDERING_POLICY=2`, `DWMWA_ALLOW_NCPAINT=0`).
+- **Z-order / taskbar activation**: Windows raises ALL visible windows of a process when one
+  is activated from the taskbar/Alt-Tab. Fix: only the hub lowers all timers
+  (`lower_timers_except("hub")`) via `SetWindowPos(HWND_BOTTOM)` on `Focused(true)`. Timer
+  focus does NOT lower the others — clicking a timer must not hide its neighbors (use
+  Ctrl-held interaction mode to click). Freshly created windows are protected by a 2s
+  birth-time grace (`BirthTimes`, `BIRTH_GRACE_MS`).
+- **`apply_window_style` must not touch z-order**: it calls `SetWindowPos(None, …
+  SWP_NOZORDER | SWP_FRAMECHANGED)` only when the `WS_EX_TRANSPARENT` flag changes (nudge
+  flag) and runs only on real opacity/click-through changes, never with `HWND_TOP`. A
+  `HWND_TOP` here would raise every timer above everything every 100ms (pollInteraction).
+  `raise_window` (HWND_TOPMOST) is the only deliberate z-order raise (overtime).
+- **AFK mute**: `get_idle_time` (Rust, `GetLastInputInfo`+`GetTickCount`, `wrapping_sub`)
+  returns ms since last system input. `TimerWidget.maybeBeep()` skips `beep_system` when
+  idle ≥ `TIMER.afkMuteMs` (60s) — independent of the `soundOn` button. Re-arms automatically
+  when the user returns.
 - **CSS style interpolation**: do NOT use `{CONSTANT}` inside `<style>` blocks — svelte-check
   reports CSS parse errors and unused-import false positives. Use inline `style` + CSS custom
   properties (`--var`) on the root element instead (see `Hub.svelte`).

@@ -116,9 +116,9 @@ fn apply_dwm(window: tauri::WebviewWindow) {
         let current = WINDOW_EX_STYLE(current as u32);
         SetWindowLongW(h, GWL_EXSTYLE, (current | WS_EX_LAYERED).0 as i32);
         let policy: u32 = 2;
-        DwmSetWindowAttribute(h, DWMWINDOWATTRIBUTE(2), &policy as *const _ as *const std::ffi::c_void, std::mem::size_of::<u32>() as u32);
+        let _ = DwmSetWindowAttribute(h, DWMWINDOWATTRIBUTE(2), &policy as *const _ as *const std::ffi::c_void, std::mem::size_of::<u32>() as u32);
         let allow_ncpaint: u32 = 0;
-        DwmSetWindowAttribute(h, DWMWINDOWATTRIBUTE(4), &allow_ncpaint as *const _ as *const std::ffi::c_void, std::mem::size_of::<u32>() as u32);
+        let _ = DwmSetWindowAttribute(h, DWMWINDOWATTRIBUTE(4), &allow_ncpaint as *const _ as *const std::ffi::c_void, std::mem::size_of::<u32>() as u32);
     }
 }
 
@@ -179,7 +179,7 @@ static TICK_WAV: &[u8] = include_bytes!("../sounds/tick.wav");
 #[tauri::command]
 fn beep_system() {
     unsafe {
-        PlaySoundW(
+        let _ = PlaySoundW(
             PCWSTR(TICK_WAV.as_ptr() as *const u16),
             None,
             SND_MEMORY | SND_ASYNC,
@@ -228,7 +228,8 @@ async fn create_timer_window(app: tauri::AppHandle, snapshot: TimerSnapshot, sta
 
 #[tauri::command]
 fn get_timer_init(window: WebviewWindow, state: State<PendingInit>) -> Option<TimerSnapshot> {
-    state.0.lock().unwrap().remove(window.label())
+    let label = window.label().to_string();
+    state.0.lock().unwrap().remove(&label)
 }
 
 #[tauri::command]
@@ -375,6 +376,9 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("PANIC: {info}");
+    }));
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
