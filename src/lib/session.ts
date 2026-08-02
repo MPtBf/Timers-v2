@@ -6,6 +6,7 @@ export interface TimerStateReport {
   durationMs: number;
   remainingMs: number;
   state: TimerState;
+  activityId?: number | null;
 }
 
 export interface TimerSnapshot extends TimerStateReport {
@@ -31,7 +32,9 @@ export function parseSession(text: string): TimerSnapshot[] | null {
   try {
     const data = JSON.parse(text) as Partial<SessionFile>;
     if (!data || data.version !== 1 || !Array.isArray(data.timers)) return null;
-    return data.timers.filter(isValidSnapshot);
+    return data.timers
+      .filter(isValidSnapshot)
+      .map((t) => ({ ...t, activityId: t.activityId ?? null }));
   } catch {
     return null;
   }
@@ -50,6 +53,9 @@ function isValidSnapshot(s: unknown): s is TimerSnapshot {
     typeof v.x === "number" &&
     typeof v.y === "number" &&
     typeof v.w === "number" &&
-    typeof v.h === "number"
+    typeof v.h === "number" &&
+    (v.activityId === undefined ||
+      v.activityId === null ||
+      typeof v.activityId === "number")
   );
 }

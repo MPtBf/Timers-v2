@@ -12,6 +12,7 @@ const base: TimerSnapshot = {
   y: 20,
   w: 95,
   h: 96,
+  activityId: null,
 };
 
 describe("session serialization", () => {
@@ -41,5 +42,17 @@ describe("session serialization", () => {
 
   it("returns empty list for empty session", () => {
     expect(parseSession(serializeSession([]))).toEqual([]);
+  });
+
+  it("roundtrips activityId on snapshots", () => {
+    const withActivity = { ...base, activityId: 42 };
+    const text = serializeSession([withActivity]);
+    expect(parseSession(text)).toEqual([withActivity]);
+  });
+
+  it("rejects snapshot with non-number activityId", () => {
+    const bad = { ...base, activityId: "nope" };
+    const text = JSON.stringify({ version: 1, timers: [base, bad] });
+    expect(parseSession(text)).toEqual([base]);
   });
 });

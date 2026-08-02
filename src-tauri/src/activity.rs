@@ -63,6 +63,7 @@ pub struct ActivitySummary {
     pub id: i64,
     pub name: String,
     pub category: String,
+    pub status: String,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -279,6 +280,26 @@ pub fn delete_activity(conn: &mut Connection, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+fn row_to_activity_block(row: &rusqlite::Row) -> rusqlite::Result<ActivityBlockRow> {
+    let tags_json: Option<String> = row.get(8)?;
+    let tags = tags_json.map(|t| serde_json::from_str::<Vec<String>>(&t).unwrap_or_default());
+    Ok(ActivityBlockRow {
+        id: row.get(0)?,
+        activity_id: row.get(1)?,
+        kind: row.get(2)?,
+        start_ms: row.get(3)?,
+        end_ms: row.get(4)?,
+        timer_label: row.get(5)?,
+        activity_name: row.get(6)?,
+        activity_category: row.get(7)?,
+        tags,
+        status: row.get(9)?,
+        efficiency: row.get(10)?,
+        usefulness: row.get(11)?,
+        log_enabled: row.get(12)?,
+    })
+}
+
 pub fn query_blocks(conn: &Connection, from_ms: i64, to_ms: i64) -> Result<Vec<ActivityBlockRow>, String> {
     let mut stmt = conn
         .prepare(
@@ -291,28 +312,27 @@ pub fn query_blocks(conn: &Connection, from_ms: i64, to_ms: i64) -> Result<Vec<A
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(params![from_ms, to_ms], |row| {
-            let tags_json: Option<String> = row.get(8)?;
-            let tags = tags_json
-                .map(|t| serde_json::from_str::<Vec<String>>(&t).unwrap_or_default());
-            Ok(ActivityBlockRow {
-                id: row.get(0)?,
-                activity_id: row.get(1)?,
-                kind: row.get(2)?,
-                start_ms: row.get(3)?,
-                end_ms: row.get(4)?,
-                timer_label: row.get(5)?,
-                activity_name: row.get(6)?,
-                activity_category: row.get(7)?,
-                tags,
-                status: row.get(9)?,
-                efficiency: row.get(10)?,
-                usefulness: row.get(11)?,
-                log_enabled: row.get(12)?,
-            })
-        })
+        .query_map(params![from_ms, to_ms], row_to_activity_block)
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+pub fn get_open_block(conn: &Connection, timer_label: &str) -> Result<Option<ActivityBlockRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT b.id, b.activity_id, b.kind, b.start_ms, b.end_ms, b.timer_label,
+                    a.name, a.category, a.tags, a.status, a.efficiency, a.usefulness, a.log_enabled
+             FROM blocks b
+             LEFT JOIN activities a ON a.id = b.activity_id
+             WHERE b.timer_label = ?1 AND b.end_ms IS NULL
+             ORDER BY b.id
+             LIMIT 1",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query_map(params![timer_label], row_to_activity_block)
+        .map_err(|e| e.to_string())?;
+    rows.next().transpose().map_err(|e| e.to_string())
 }
 
 pub fn suggestions(conn: &Connection) -> Result<Suggestions, String> {
@@ -327,7 +347,7 @@ pub fn suggestions(conn: &Connection) -> Result<Suggestions, String> {
 
     let mut act_stmt = conn
         .prepare(
-            "SELECT id, name, category FROM activities ORDER BY started_ms DESC LIMIT 100",
+            "SELECT id, name, category, status FROM activities ORDER BY started_ms DESC LIMIT 100",
         )
         .map_err(|e| e.to_string())?;
     let activities = act_stmt
@@ -336,6 +356,7 @@ pub fn suggestions(conn: &Connection) -> Result<Suggestions, String> {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 category: row.get(2)?,
+                status: row.get(3)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -735,6 +756,55 @@ mod tests {
         let rows = query_blocks(&conn, 0, 10_000).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, b2);
+    }
+
+    #[test]
+    fn get_open_block_returns_none_when_closed_or_absent() {
+        let mut conn = db();
+        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
+        open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
+        close_block(&mut conn, "timer-1", 2_000).unwrap();
+
+        assert_eq!(get_open_block(&conn, "timer-1").unwrap(), None);
+        assert_eq!(get_open_block(&conn, "timer-9").unwrap(), None);
+    }
+
+    #[test]
+    fn get_open_block_returns_joined_open_work_block() {
+        let mut conn = db();
+        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
+        let bid = open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
+
+        let got = get_open_block(&conn, "timer-1").unwrap().unwrap();
+        assert_eq!(got.id, bid);
+        assert_eq!(got.activity_id, Some(id));
+        assert_eq!(got.kind, KIND_WORK);
+        assert_eq!(got.end_ms, None);
+        assert_eq!(got.activity_name.as_deref(), Some("Парсер"));
+        assert_eq!(got.activity_category.as_deref(), Some("Работа"));
+    }
+
+    #[test]
+    fn get_open_block_returns_open_break_with_null_activity() {
+        let mut conn = db();
+        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
+        open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
+        close_block(&mut conn, "timer-1", 2_000).unwrap();
+        open_block(&mut conn, &break_block("timer-1", 2_000, None)).unwrap();
+
+        let got = get_open_block(&conn, "timer-1").unwrap().unwrap();
+        assert_eq!(got.kind, KIND_BREAK);
+        assert_eq!(got.activity_id, None);
+        assert_eq!(got.activity_name, None);
+    }
+
+    #[test]
+    fn suggestions_include_activity_status() {
+        let mut conn = db();
+        upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
+        let s = suggestions(&conn).unwrap();
+        assert_eq!(s.activities.len(), 1);
+        assert_eq!(s.activities[0].status, STATUS_ACTIVE);
     }
 
     #[test]

@@ -60,6 +60,7 @@ export interface ActivitySummary {
   id: number;
   name: string;
   category: string;
+  status: ActivityStatus;
 }
 
 export interface Suggestions {

@@ -122,6 +122,10 @@ export async function activityQuery(fromMs: number, toMs: number): Promise<Activ
   return await invoke<ActivityBlockRow[]>("activity_query", { fromMs, toMs });
 }
 
+export async function activityGetOpenBlock(timerLabel: string): Promise<ActivityBlockRow | null> {
+  return await invoke<ActivityBlockRow | null>("activity_get_open_block", { timerLabel });
+}
+
 export async function activitySuggestions(): Promise<Suggestions> {
   return await invoke<Suggestions>("activity_suggestions");
 }
