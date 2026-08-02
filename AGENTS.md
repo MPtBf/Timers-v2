@@ -204,6 +204,19 @@ Rust provides `get_modifier_state` (Ctrl/Shift via `GetAsyncKeyState`) and
   returns ms since last system input. `TimerWidget.maybeBeep()` skips `beep_system` when
   idle ≥ `TIMER.afkMuteMs` (60s) — independent of the `soundOn` button. Re-arms automatically
   when the user returns.
+- **`emit_to` is not strictly window-targeted in practice**: panel windows drive timers with
+  `emitTo(timerLabel, …)`, but Tauri v2.11 delivers those events to listeners registered with
+  `listen()` (target `Any`) in OTHER windows too — verified empirically (probe events targeted
+  at timer-2 fired listeners in timer-3). Every panel→timer command payload must carry
+  `timerLabel` and `TimerOverlay` must filter `e.payload.timerLabel !== win.label` before acting.
+  Same applies to hub-targeted `timer-snapshot` (broadcast-y but arrives at hub). Global
+  broadcasts (`mute-all`, `pin-all`) are intentionally unfiltered.
+- **Float snapshot values break restore**: `TimerModel` remainingMs/durationMs accumulate float
+  drift (e.g. `269894.6999…`). Rust `TimerSnapshot` deserializes into `i64` and rejects floats
+  (`invalid type: floating point …, expected i64`), so restoring a *running* timer silently
+  fails and the hub wipes the session via the remove-on-error path. Always round in
+  `TimerWidget.reportNow()` and defensively in `parseSession()`. Edit-files-while-running HMR
+  also fires the destroy-cleanup `logger.stop()`, closing open blocks mid-test.
 - **CSS style interpolation**: do NOT use `{CONSTANT}` inside `<style>` blocks — svelte-check
   reports CSS parse errors and unused-import false positives. Use inline `style` + CSS custom
   properties (`--var`) on the root element instead (see `Hub.svelte`).
