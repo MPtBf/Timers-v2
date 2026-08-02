@@ -7,6 +7,11 @@ Port of the original PyQt6 project (was at `C:\Users\ediko\PycharmProjects\Timer
 A **hub** window (normal, decorated) creates and manages multiple tiny transparent
 always-on-top timer overlay windows. Each timer window shows a countdown with a progress ring.
 
+**Planned feature — логирование дел + дашборд-календарь**: полный дизайн, модель данных
+(SQLite `activity.db`), механика событий и фазы в `docs/activity-logging-plan.md`. При
+работе над этой фичей сначала читать тот документ. Ключевое: один таймер за раз (v1),
+оценки 0–100 ставятся на дело по кнопке «Завершить дело», автопауза по idle вкл.
+
 ## Tech Stack
 - **Frontend**: Svelte 5 (runes only: `$state`, `$derived`, `$props`, `$effect`), TypeScript, Vanilla CSS
 - **Backend**: Rust via Tauri (Win32 API for click-through, opacity, flash, beep, DWM shadow, tray)

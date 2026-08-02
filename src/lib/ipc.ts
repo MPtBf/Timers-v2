@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { TimerSnapshot } from "./session";
+import type { Activity, ActivityBlock, ActivityBlockRow, Suggestions } from "./activity";
 
 export async function setClickThrough(enabled: boolean): Promise<void> {
   await invoke("set_click_through", { enabled });
@@ -75,6 +76,58 @@ export async function saveSession(json: string): Promise<void> {
 
 export async function loadSession(): Promise<string | null> {
   return await invoke<string | null>("load_session");
+}
+
+export async function getActivityDbPath(): Promise<string> {
+  return await invoke<string>("get_activity_db_path");
+}
+
+export async function activityUpsert(activity: Activity): Promise<number> {
+  return await invoke<number>("activity_upsert", { activity });
+}
+
+export async function activityOpenBlock(block: ActivityBlock): Promise<number> {
+  return await invoke<number>("activity_open_block", { block });
+}
+
+export async function activityCloseBlock(
+  timerLabel: string,
+  endMs: number
+): Promise<number | null> {
+  return await invoke<number | null>("activity_close_block", { timerLabel, endMs });
+}
+
+export async function activityFinish(
+  activityId: number,
+  efficiency: number | null,
+  usefulness: number | null,
+  endedMs: number
+): Promise<void> {
+  return await invoke<void>("activity_finish", { activityId, efficiency, usefulness, endedMs });
+}
+
+export async function activityUpdateBlock(block: ActivityBlock): Promise<void> {
+  return await invoke<void>("activity_update_block", { block });
+}
+
+export async function activityDeleteBlock(id: number): Promise<void> {
+  return await invoke<void>("activity_delete_block", { id });
+}
+
+export async function activityDeleteActivity(id: number): Promise<void> {
+  return await invoke<void>("activity_delete_activity", { id });
+}
+
+export async function activityQuery(fromMs: number, toMs: number): Promise<ActivityBlockRow[]> {
+  return await invoke<ActivityBlockRow[]>("activity_query", { fromMs, toMs });
+}
+
+export async function activitySuggestions(): Promise<Suggestions> {
+  return await invoke<Suggestions>("activity_suggestions");
+}
+
+export async function activityReconcile(cutoffMs: number): Promise<number> {
+  return await invoke<number>("activity_reconcile", { cutoffMs });
 }
 
 export async function quitAll(): Promise<void> {

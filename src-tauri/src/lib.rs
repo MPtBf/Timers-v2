@@ -3,6 +3,8 @@ use std::fs;
 use std::sync::Mutex;
 use std::time::Instant;
 
+mod activity;
+
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::WindowEvent;
@@ -50,7 +52,17 @@ struct PendingInit(Mutex<HashMap<String, TimerSnapshot>>);
 
 struct BirthTimes(Mutex<HashMap<String, Instant>>);
 
+struct ActivityDb(Mutex<rusqlite::Connection>);
+
 const BIRTH_GRACE_MS: u64 = 2000;
+const RECONCILE_STALE_MS: i64 = 300_000;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 fn lower_timers_except(app: &tauri::AppHandle, stay: &str) {
     for (label, win) in app.webview_windows() {
@@ -310,6 +322,92 @@ fn load_session(app: tauri::AppHandle) -> Option<String> {
 }
 
 #[tauri::command]
+fn get_activity_db_path(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join(activity::ACTIVITY_DB_FILE).to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn activity_upsert(
+    state: State<'_, ActivityDb>,
+    activity: activity::Activity,
+) -> Result<i64, String> {
+    let mut conn = state.0.lock().unwrap();
+    activity::upsert_activity(&mut conn, &activity)
+}
+
+#[tauri::command]
+fn activity_open_block(state: State<'_, ActivityDb>, block: activity::Block) -> Result<i64, String> {
+    let mut conn = state.0.lock().unwrap();
+    activity::open_block(&mut conn, &block)
+}
+
+#[tauri::command]
+fn activity_close_block(
+    state: State<'_, ActivityDb>,
+    timer_label: String,
+    end_ms: i64,
+) -> Result<Option<i64>, String> {
+    let mut conn = state.0.lock().unwrap();
+    activity::close_block(&mut conn, &timer_label, end_ms)
+}
+
+#[tauri::command]
+fn activity_finish(
+    state: State<'_, ActivityDb>,
+    activity_id: i64,
+    efficiency: Option<i64>,
+    usefulness: Option<i64>,
+    ended_ms: i64,
+) -> Result<(), String> {
+    let mut conn = state.0.lock().unwrap();
+    activity::finish_activity(&mut conn, activity_id, efficiency, usefulness, ended_ms)
+}
+
+#[tauri::command]
+fn activity_update_block(
+    state: State<'_, ActivityDb>,
+    block: activity::Block,
+) -> Result<(), String> {
+    let mut conn = state.0.lock().unwrap();
+    activity::update_block(&mut conn, &block)
+}
+
+#[tauri::command]
+fn activity_delete_block(state: State<'_, ActivityDb>, id: i64) -> Result<(), String> {
+    let mut conn = state.0.lock().unwrap();
+    activity::delete_block(&mut conn, id)
+}
+
+#[tauri::command]
+fn activity_delete_activity(state: State<'_, ActivityDb>, id: i64) -> Result<(), String> {
+    let mut conn = state.0.lock().unwrap();
+    activity::delete_activity(&mut conn, id)
+}
+
+#[tauri::command]
+fn activity_query(
+    state: State<'_, ActivityDb>,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<activity::ActivityBlockRow>, String> {
+    let conn = state.0.lock().unwrap();
+    activity::query_blocks(&conn, from_ms, to_ms)
+}
+
+#[tauri::command]
+fn activity_suggestions(state: State<'_, ActivityDb>) -> Result<activity::Suggestions, String> {
+    let conn = state.0.lock().unwrap();
+    activity::suggestions(&conn)
+}
+
+#[tauri::command]
+fn activity_reconcile(state: State<'_, ActivityDb>, cutoff_ms: i64) -> Result<usize, String> {
+    let mut conn = state.0.lock().unwrap();
+    activity::reconcile(&mut conn, cutoff_ms)
+}
+
+#[tauri::command]
 fn quit_all(app: tauri::AppHandle) {
     for (_, win) in app.webview_windows() {
         let _ = win.destroy();
@@ -414,6 +512,17 @@ pub fn run() {
             focus_timer,
             save_session,
             load_session,
+            get_activity_db_path,
+            activity_upsert,
+            activity_open_block,
+            activity_close_block,
+            activity_finish,
+            activity_update_block,
+            activity_delete_block,
+            activity_delete_activity,
+            activity_query,
+            activity_suggestions,
+            activity_reconcile,
             quit_all,
         ]);
 
@@ -429,6 +538,21 @@ pub fn run() {
     builder
         .setup(|app| {
             setup_tray(app)?;
+
+            if let Some(dir) = app.path().app_config_dir().ok() {
+                let _ = fs::create_dir_all(&dir);
+                let path = dir.join(activity::ACTIVITY_DB_FILE);
+                if let Ok(conn) = rusqlite::Connection::open(&path) {
+                    if activity::init(&conn).is_ok() {
+                        let db = ActivityDb(Mutex::new(conn));
+                        let cutoff = now_ms() - RECONCILE_STALE_MS;
+                        if let Ok(mut guard) = db.0.lock() {
+                            let _ = activity::reconcile(&mut guard, cutoff);
+                        }
+                        app.manage(db);
+                    }
+                }
+            }
 
             if let Some(hub) = app.get_webview_window(HUB_LABEL) {
                 let hub_for_close = hub.clone();
