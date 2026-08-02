@@ -36,6 +36,15 @@ export const SIDE_BTN_FONT_SIZE = 9;
 
 export const DRAG_STRIP_WIDTH = 18;
 
+export const TASK_PANEL_WIDTH = 280;
+export const TASK_PANEL_HEIGHT = 205;
+export const FINISH_PANEL_WIDTH = 280;
+export const FINISH_PANEL_HEIGHT = 190;
+
+export const AUTO_PAUSE_IDLE_MS = 120000;
+
+export const TASK_NAME_COLOR = TEXT_DIM;
+
 export const TIMER = {
   tickIntervalMs: 33,
   overtimeBeepIntervalMs: 1000,
