@@ -33,13 +33,11 @@
   let logState = $state<LogState | null>(null);
   let ctrl = $state<TimerControl>(createTimerControl());
 
-  let hasActivity = $derived(logState?.activityId != null);
   let minutesNow = $derived(
     timerReport !== null && timerReport.durationMs > 0
       ? Number((timerReport.durationMs / 60000).toFixed(1))
       : null
   );
-
   function reportSnapshot() {
     if (timerReport === null || id === null) return;
     const report = timerReport;
@@ -249,16 +247,9 @@
         <button
           class="side-btn"
           class:active={logState?.activityId != null}
-          title="Task details"
+          title="Дело"
           onclick={openTaskPanel}
         >✎</button>
-        {#if hasActivity}
-          <button
-            class="side-btn"
-            title="Завершить дело"
-            onclick={() => openFinishPanel(logState?.activityId ?? null, logState?.activityName ?? null)}
-          >✔</button>
-        {/if}
         <div
           class="drag-strip"
           role="button"
