@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { BTN_BG, BTN_HOVER, BG_PANEL, BORDER_COLOR, TEXT_COLOR, TEXT_DIM, ACCENT_BG, ACCENT_FG } from "../constants";
+  import { BTN_BG, BG_PANEL, BORDER_COLOR, TEXT_COLOR, TEXT_DIM, ACCENT_BG, ACCENT_FG } from "../constants";
   import type { ActivitySummary, Suggestions } from "./activity";
 
   let {
@@ -68,7 +68,7 @@
     />
     <datalist id="task-cat-list">
       {#each suggestions?.categories ?? [] as c}
-        <option value={c} />
+        <option value={c}></option>
       {/each}
     </datalist>
   </div>
@@ -84,7 +84,7 @@
     />
     <datalist id="task-name-list">
       {#each suggestions?.activities ?? [] as a}
-        <option value={a.name} />
+        <option value={a.name}></option>
       {/each}
     </datalist>
   </div>

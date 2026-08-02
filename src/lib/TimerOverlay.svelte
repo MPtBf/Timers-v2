@@ -8,14 +8,21 @@
   } from "../constants";
   import {
     setClickThrough, setOpacity, getModifierState, getCursorPos,
-    applyDwm, getTimerInit, raiseWindow,
+    applyDwm, getTimerInit, raiseWindow, createTaskPanel, createFinishPanel,
   } from "./ipc";
   import { HUB_LABEL, timerIdFromLabel } from "./windows";
-  import { EVT_TIMER_SNAPSHOT, EVT_MUTE_ALL, EVT_PIN_ALL } from "./events";
+  import {
+    EVT_TIMER_SNAPSHOT, EVT_MUTE_ALL, EVT_PIN_ALL,
+    EVT_TASK_START, EVT_TASK_FINISH, EVT_TASK_CONFIG, EVT_REQUEST_FINISH,
+  } from "./events";
   import type { TimerSnapshot, TimerStateReport } from "./session";
+  import type { TimerControl, LogState, RequestFinishCommand } from "./timer-control";
+  import { createTimerControl } from "./timer-control";
+  import type { StartCommand, FinishCommand, ConfigCommand } from "./timer-control";
 
   const win = getCurrentWindow();
   const id = timerIdFromLabel(win.label);
+  const timerLabel = win.label;
 
   let soundOn = $state(true);
   let pinned = $state(false);
@@ -23,6 +30,15 @@
   let overtimeActive = $state(false);
   let initial = $state<TimerStateReport | null>(null);
   let timerReport = $state<TimerStateReport | null>(null);
+  let logState = $state<LogState | null>(null);
+  let ctrl = $state<TimerControl>(createTimerControl());
+
+  let hasActivity = $derived(logState?.activityId != null);
+  let minutesNow = $derived(
+    timerReport !== null && timerReport.durationMs > 0
+      ? Number((timerReport.durationMs / 60000).toFixed(1))
+      : null
+  );
 
   function reportSnapshot() {
     if (timerReport === null || id === null) return;
@@ -39,6 +55,7 @@
         y: Math.round(p.y),
         w: WINDOW_WIDTH,
         h: WINDOW_HEIGHT,
+        activityId: report.activityId ?? null,
       };
       emitTo(HUB_LABEL, EVT_TIMER_SNAPSHOT, snapshot);
     }).catch((err) => {
@@ -68,6 +85,21 @@
     } else {
       win.setAlwaysOnTop(pinned);
     }
+  }
+
+  function openTaskPanel() {
+    createTaskPanel(timerLabel, logState?.logEnabled ?? null, logState?.autoPause ?? null, minutesNow)
+      .catch((err) => console.error("createTaskPanel error:", err));
+  }
+
+  function openFinishPanel(activityId: number | null, activityName: string | null) {
+    if (activityId === null) return;
+    createFinishPanel(timerLabel, activityId, activityName)
+      .catch((err) => console.error("createFinishPanel error:", err));
+  }
+
+  function onLogState(s: LogState) {
+    logState = s;
   }
 
   async function applyInteraction(ctrl: boolean, shift: boolean, over: boolean) {
@@ -127,20 +159,32 @@
   });
 
   $effect(() => {
-    const unlistenPromise = listen<boolean>(EVT_MUTE_ALL, (e) => {
+    const unlistens: Array<Promise<() => void>> = [];
+    unlistens.push(listen<boolean>(EVT_MUTE_ALL, (e) => {
       soundOn = !e.payload;
       reportSnapshot();
-    });
-    const unlistenPinPromise = listen<boolean>(EVT_PIN_ALL, (e) => {
+    }));
+    unlistens.push(listen<boolean>(EVT_PIN_ALL, (e) => {
       pinned = e.payload;
       if (overtimeActive) {
         win.setAlwaysOnTop(true);
       }
       reportSnapshot();
-    });
+    }));
+    unlistens.push(listen<StartCommand>(EVT_TASK_START, (e) => {
+      ctrl.start = e.payload;
+    }));
+    unlistens.push(listen<FinishCommand>(EVT_TASK_FINISH, (e) => {
+      ctrl.finish = e.payload;
+    }));
+    unlistens.push(listen<ConfigCommand>(EVT_TASK_CONFIG, (e) => {
+      ctrl.config = e.payload;
+    }));
+    unlistens.push(listen<RequestFinishCommand>(EVT_REQUEST_FINISH, (e) => {
+      openFinishPanel(e.payload.activityId, e.payload.activityName);
+    }));
     return () => {
-      unlistenPromise.then((fn) => fn());
-      unlistenPinPromise.then((fn) => fn());
+      for (const p of unlistens) p.then((fn) => fn());
     };
   });
 
@@ -172,8 +216,11 @@
         <TimerWidget
           {soundOn}
           {initial}
+          {timerLabel}
+          {ctrl}
           onOvertimeChange={handleOvertimeChange}
           onStateReport={(r) => { timerReport = r; }}
+          onLogState={onLogState}
         />
       </div>
       <div class="right-col">
@@ -194,6 +241,19 @@
           title="Always on top"
           onclick={togglePin}
         >📌</button>
+        <button
+          class="side-btn"
+          class:active={logState?.activityId != null}
+          title="Task details"
+          onclick={openTaskPanel}
+        >✎</button>
+        {#if hasActivity}
+          <button
+            class="side-btn"
+            title="Завершить дело"
+            onclick={() => openFinishPanel(logState?.activityId ?? null, logState?.activityName ?? null)}
+          >✔</button>
+        {/if}
         <div
           class="drag-strip"
           role="button"
@@ -241,17 +301,17 @@
     display: flex;
     flex-direction: column;
     gap: 0;
-    width: 18px;
+    width: 16px;
     height: 100%;
     flex-shrink: 0;
   }
   .side-btn {
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     border: none;
     background: #555555;
     color: #888888;
-    font-size: 9px;
+    font-size: 8px;
     font-family: "Segoe UI Symbol", sans-serif;
     cursor: pointer;
     padding: 0;
@@ -271,7 +331,7 @@
   }
   .drag-strip {
     flex: 1;
-    width: 18px;
+    width: 16px;
     background: #333333;
     cursor: grab;
     min-height: 14px;

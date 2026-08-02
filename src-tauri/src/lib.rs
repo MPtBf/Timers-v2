@@ -28,10 +28,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const HUB_LABEL: &str = "hub";
 const TIMER_PREFIX: &str = "timer-";
+const TASK_PANEL_PREFIX: &str = "task-";
+const FINISH_PANEL_PREFIX: &str = "finish-";
 const SESSION_FILE: &str = "session.json";
 const SESSION_TMP_FILE: &str = "session.json.tmp";
 const DEFAULT_W: f64 = 95.0;
 const DEFAULT_H: f64 = 96.0;
+const TASK_PANEL_W: f64 = 280.0;
+const TASK_PANEL_H: f64 = 205.0;
+const FINISH_PANEL_W: f64 = 280.0;
+const FINISH_PANEL_H: f64 = 190.0;
+const PANEL_GAP: f64 = 6.0;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +57,19 @@ struct TimerSnapshot {
 }
 
 struct PendingInit(Mutex<HashMap<String, TimerSnapshot>>);
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PanelInit {
+    timer_label: String,
+    log_enabled: Option<bool>,
+    auto_pause: Option<bool>,
+    activity_id: Option<i64>,
+    activity_name: Option<String>,
+    minutes: Option<f64>,
+}
+
+struct PendingPanelInit(Mutex<HashMap<String, PanelInit>>);
 
 struct BirthTimes(Mutex<HashMap<String, Instant>>);
 
@@ -241,6 +261,95 @@ async fn create_timer_window(app: tauri::AppHandle, snapshot: TimerSnapshot, sta
 
 #[tauri::command]
 fn get_timer_init(window: WebviewWindow, state: State<PendingInit>) -> Option<TimerSnapshot> {
+    let label = window.label().to_string();
+    state.0.lock().unwrap().remove(&label)
+}
+
+fn panel_position(app: &tauri::AppHandle, timer_label: &str) -> (f64, f64) {
+    if let Some(win) = app.get_webview_window(timer_label) {
+        if let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) {
+            return (pos.x as f64 + size.width as f64 + PANEL_GAP, pos.y as f64);
+        }
+    }
+    (PANEL_GAP + 140.0, PANEL_GAP + 140.0)
+}
+
+fn create_panel_window(
+    app: &tauri::AppHandle,
+    label: &str,
+    query: &str,
+    init: PanelInit,
+    width: f64,
+    height: f64,
+    pending: &PendingPanelInit,
+) -> Result<(), String> {
+    if app.get_webview_window(label).is_some() {
+        return Ok(());
+    }
+    let (x, y) = panel_position(app, &init.timer_label);
+    pending.0.lock().unwrap().insert(label.to_string(), init);
+    let url = WebviewUrl::App(format!("index.html{query}").into());
+    WebviewWindowBuilder::new(app, label.to_string(), url)
+        .title("Timer")
+        .inner_size(width, height)
+        .position(x, y)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(true)
+        .build()
+        .map_err(|e| {
+            eprintln!("create_panel_window build error: {e:?}");
+            e.to_string()
+        })?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_task_panel(
+    app: tauri::AppHandle,
+    timer_label: String,
+    log_enabled: Option<bool>,
+    auto_pause: Option<bool>,
+    minutes: Option<f64>,
+    state: State<'_, PendingPanelInit>,
+) -> Result<(), String> {
+    let init = PanelInit {
+        timer_label: timer_label.clone(),
+        log_enabled,
+        auto_pause,
+        activity_id: None,
+        activity_name: None,
+        minutes,
+    };
+    let label = format!("{TASK_PANEL_PREFIX}{timer_label}");
+    create_panel_window(&app, &label, &format!("?task={timer_label}"), init, TASK_PANEL_W, TASK_PANEL_H, state.inner())
+}
+
+#[tauri::command]
+async fn create_finish_panel(
+    app: tauri::AppHandle,
+    timer_label: String,
+    activity_id: Option<i64>,
+    activity_name: Option<String>,
+    state: State<'_, PendingPanelInit>,
+) -> Result<(), String> {
+    let init = PanelInit {
+        timer_label: timer_label.clone(),
+        log_enabled: None,
+        auto_pause: None,
+        activity_id,
+        activity_name,
+        minutes: None,
+    };
+    let label = format!("{FINISH_PANEL_PREFIX}{timer_label}");
+    create_panel_window(&app, &label, &format!("?finish={timer_label}"), init, FINISH_PANEL_W, FINISH_PANEL_H, state.inner())
+}
+
+#[tauri::command]
+fn get_panel_init(window: WebviewWindow, state: State<PendingPanelInit>) -> Option<PanelInit> {
     let label = window.label().to_string();
     state.0.lock().unwrap().remove(&label)
 }
@@ -501,6 +610,7 @@ pub fn run() {
                 .build(),
         )
         .manage(PendingInit(Mutex::new(HashMap::new())))
+        .manage(PendingPanelInit(Mutex::new(HashMap::new())))
         .manage(BirthTimes(Mutex::new(HashMap::new())))
         .invoke_handler(tauri::generate_handler![
             set_click_through,
@@ -514,6 +624,9 @@ pub fn run() {
             get_cursor_pos,
             create_timer_window,
             get_timer_init,
+            create_task_panel,
+            create_finish_panel,
+            get_panel_init,
             hide_timers,
             show_timers,
             set_timers_always_on_top,

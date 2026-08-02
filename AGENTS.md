@@ -25,36 +25,53 @@ src/
 ├── main.ts                     # Entry: mount(App, {target}) + MCP bridge (dev only)
 ├── app.css                     # Global reset styles
 ├── constants.ts                # ALL UI constants (colors, sizes, TIMER/SESSION timings)
-├── App.svelte                  # Dispatcher: window label "hub" → Hub, "timer-*" → TimerOverlay
+├── App.svelte                  # Dispatcher: hub → Hub, timer-* → TimerOverlay, task-*/finish-* → panels
 └── lib/
     ├── timer.svelte.ts         # TimerModel — pure TS class, callbacks-based, restore()
-    ├── TimerWidget.svelte      # Timer UI: spinbox + inline ring SVG + time + buttons + state report
-    ├── TimerOverlay.svelte     # Timer window chrome: polling, snapshot report, mute/pin listeners
+    ├── TimerWidget.svelte      # Timer UI + ActivityLogger integration + idle auto-pause + external control
+    ├── TimerOverlay.svelte     # Timer window chrome: polling, snapshot report, panel buttons, event listeners
     ├── Hub.svelte              # Hub UI: list, create, broadcast buttons, session coordinator
+    ├── TaskPanel.svelte        # Presentational task form (category/name/tags/log/autopause/start/finish)
+    ├── FinishPanel.svelte      # Presentational finish dialog (2 sliders 0–100 + save/cancel)
+    ├── TaskPanelWindow.svelte  # task-* popup window: wires TaskPanel to DB + emits to timer
+    ├── FinishPanelWindow.svelte# finish-* popup window: wires FinishPanel to timer via task-finish
     ├── session.ts              # TimerSnapshot/TimerStateReport types + JSON serialize/parse
-    ├── events.ts               # Event name constants (timer-snapshot, mute-all, …)
-    ├── windows.ts              # Label helpers (hub vs timer-*, id parsing)
+    ├── activity.ts             # Activity/ActivityBlock/DayLane types + pure helpers (tags, ratingMetric, buildDayLane)
+    ├── activity-logger.ts      # ActivityLogger — pure block-flow planner (LogOp[]), restore(), begin(), finish()
+    ├── logger-runner.ts        # executeOps(ops, runner) + ipcLogRunner — maps LogOp → DB calls
+    ├── timer-control.ts        # TimerControl + Start/Finish/Config/LogState payload types
+    ├── idle-pause.ts           # shouldAutoPause pure predicate (idle threshold, overtime, state)
+    ├── task-panel.ts           # computeTaskPrefill pure prefill logic for the task panel
+    ├── events.ts               # Event name constants (timer-snapshot, task-start, task-finish, …)
+    ├── windows.ts              # Label helpers (hub / timer-* / task-* / finish-*, id parsing)
     ├── format.ts               # formatClockTime (MM:SS)
     ├── TimerDisplay.svelte     # UNUSED text component (TimerWidget has inline span)
     ├── CircularProgress.svelte # UNUSED SVG ring (TimerWidget has inline SVG)
     ├── ipc.ts                  # Typed wrappers around invoke() for the Rust commands
     ├── interaction.ts          # Pure logic: computeInteractionMode + getInteractionAction
-    └── __tests__/              # timer, ipc, interaction, session, windows tests
+    └── __tests__/              # timer, ipc, interaction, session, windows, activity, logger, runner, idle, panel tests
 src-tauri/
-├── src/lib.rs                  # Rust commands + DWM + tray + session atomic write + multi-window
+├── src/lib.rs                  # Rust commands + DWM + tray + session atomic write + multi-window + panel windows
 ├── src/main.rs                 # Rust entry point
 ├── sounds/tick.wav             # Beep sound (embedded via include_bytes!, needs Rust rebuild)
-├── tauri.conf.json             # main window = hub (300x380, decorated); timer windows created at runtime
-├── capabilities/default.json   # windows: ["hub", "timer-*"] (glob), window perms
+├── tauri.conf.json             # main window = hub (300x380, decorated); timer/panel windows created at runtime
+├── capabilities/default.json   # windows: ["hub", "timer-*", "task-*", "finish-*"] (glob), window perms
 └── Cargo.toml
 ```
 
 > `TimerDisplay.svelte` and `CircularProgress.svelte` are legacy and NOT imported.
-> Timer windows: label `timer-{id}`, 95×96, `decorations:false`, `transparent:true`,
+> Timer windows: label `timer-{id}`, 95×112, `decorations:false`, `transparent:true`,
 > always-on-top only when `pinned` or overtime is active. Created from Rust via
 > `create_timer_window`. Visible in taskbar and Alt-Tab (`skip_taskbar(false)`) so timers are
 > reachable without the hub.
-> Each timer window is its own Svelte instance; `App.svelte` picks the view from `label`.
+> **Panel windows**: label `task-{timerLabel}` / `finish-{timerLabel}`, 280×205 / 280×190,
+> `decorations:false`, `transparent:true`, `always_on_top:true`, `skip_taskbar:true`,
+> positioned beside the timer (`PANEL_GAP`). Created via `create_task_panel` /
+> `create_finish_panel`; they fetch `PanelInit` through `get_panel_init` (pending map, same
+> pattern as `get_timer_init`). Panels drive the timer window via Tauri events
+> (`task-start`, `task-finish`, `task-config`, `request-finish`); ALL DB mutations flow
+> through `TimerWidget`'s `ActivityLogger` + `logger-runner` (single source of truth).
+> Each window is its own Svelte instance; `App.svelte` picks the view from `label`.
 
 ## Multi-window / session model
 - Hub is the source of truth for persistence; timer windows report state to it.
@@ -158,10 +175,10 @@ Rust provides `get_modifier_state` (Ctrl/Shift via `GetAsyncKeyState`) and
 
 ## Gotchas
 - **svelte-check false errors**: TypeScript ~6.0.3 misreads Svelte 5 runes
-  (`Cannot use 'state' as a store`, etc.). 10 errors in `TimerWidget.svelte` are FALSE
+  (`Cannot use 'state' as a store`, etc.). 11 errors in `TimerWidget.svelte` are FALSE
   positives (variable named `state` + `$state` declarations); vitest passes.
-- **Window width**: timer windows created wider than 95×96. Fixed by
-  `win.setSize(new LogicalSize(95, 96))` in `TimerOverlay.svelte` `$effect`.
+- **Window size**: timer windows created wider/taller than 95×112. Fixed by
+  `win.setSize(new LogicalSize(95, 112))` in `TimerOverlay.svelte` `$effect`.
 - **Sound**: `tick.wav` embedded via `include_bytes!` + `PlaySoundW(SND_MEMORY|SND_ASYNC)`.
   Replacing the file requires a Rust rebuild.
 - **MCP plugin**: dev-only, socket `\\.\pipe\tmp\tauri-mcp.sock`. On Windows it needs a

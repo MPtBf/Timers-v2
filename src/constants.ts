@@ -1,5 +1,5 @@
 export const WINDOW_WIDTH = 95;
-export const WINDOW_HEIGHT = 96;
+export const WINDOW_HEIGHT = 112;
 
 export const HUB_WIDTH = 300;
 export const HUB_HEIGHT = 380;

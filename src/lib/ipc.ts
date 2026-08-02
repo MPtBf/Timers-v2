@@ -2,6 +2,15 @@ import { invoke } from "@tauri-apps/api/core";
 import type { TimerSnapshot } from "./session";
 import type { Activity, ActivityBlock, ActivityBlockRow, Suggestions } from "./activity";
 
+export interface PanelInit {
+  timerLabel: string;
+  logEnabled: boolean | null;
+  autoPause: boolean | null;
+  activityId: number | null;
+  activityName: string | null;
+  minutes: number | null;
+}
+
 export async function setClickThrough(enabled: boolean): Promise<void> {
   await invoke("set_click_through", { enabled });
 }
@@ -44,6 +53,27 @@ export async function createTimerWindow(snapshot: TimerSnapshot): Promise<void> 
 
 export async function getTimerInit(): Promise<TimerSnapshot | null> {
   return await invoke<TimerSnapshot | null>("get_timer_init");
+}
+
+export async function createTaskPanel(
+  timerLabel: string,
+  logEnabled: boolean | null,
+  autoPause: boolean | null,
+  minutes: number | null
+): Promise<void> {
+  await invoke("create_task_panel", { timerLabel, logEnabled, autoPause, minutes });
+}
+
+export async function createFinishPanel(
+  timerLabel: string,
+  activityId: number | null,
+  activityName: string | null
+): Promise<void> {
+  await invoke("create_finish_panel", { timerLabel, activityId, activityName });
+}
+
+export async function getPanelInit(): Promise<PanelInit | null> {
+  return await invoke<PanelInit | null>("get_panel_init");
 }
 
 export async function hideTimers(): Promise<void> {

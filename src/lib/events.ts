@@ -3,3 +3,7 @@ export const EVT_TIMER_CLOSED = "timer-closed";
 export const EVT_MUTE_ALL = "mute-all";
 export const EVT_PIN_ALL = "pin-all";
 export const EVT_REQUEST_QUIT = "request-quit";
+export const EVT_TASK_START = "task-start";
+export const EVT_TASK_FINISH = "task-finish";
+export const EVT_TASK_CONFIG = "task-config";
+export const EVT_REQUEST_FINISH = "request-finish";

@@ -160,4 +160,62 @@ describe("ActivityLogger", () => {
     const ops = l.stop(2000);
     expect(closeOps(ops)).toEqual([{ type: "close", timerLabel: "timer-1", endMs: 2000 }]);
   });
+
+  it("begin opens a fresh work block and binds the activity", () => {
+    const l = new ActivityLogger("timer-1");
+    const ops = l.begin(7, 1000);
+    expect(ops).toHaveLength(1);
+    expect(openOps(ops)[0].block).toMatchObject({ activityId: 7, kind: "work", startMs: 1000 });
+    expect(l.activityId).toBe(7);
+    expect(l.openKind).toBe("work");
+  });
+
+  it("begin with logging off clears activity and opens nothing", () => {
+    const l = new ActivityLogger("timer-1", false);
+    const ops = l.begin(7, 1000);
+    expect(ops).toEqual([]);
+    expect(l.activityId).toBeNull();
+    expect(l.openKind).toBeNull();
+  });
+
+  it("begin without activity id clears a stale binding", () => {
+    const l = new ActivityLogger("timer-1");
+    l.start(7, 1000);
+    l.stop(2000);
+    expect(l.activityId).toBe(7);
+    const ops = l.begin(null, 3000);
+    expect(ops).toEqual([]);
+    expect(l.activityId).toBeNull();
+    expect(l.openKind).toBeNull();
+  });
+
+  it("begin closes a leftover open block before opening the new work", () => {
+    const l = new ActivityLogger("timer-1");
+    l.start(7, 1000);
+    const ops = l.begin(8, 2000);
+    expect(closeOps(ops)).toEqual([{ type: "close", timerLabel: "timer-1", endMs: 2000 }]);
+    expect(openOps(ops)[0].block).toMatchObject({ activityId: 8, kind: "work", startMs: 2000 });
+    expect(l.activityId).toBe(8);
+    expect(l.openKind).toBe("work");
+  });
+
+  it("begin closes a leftover open block when logging off", () => {
+    const l = new ActivityLogger("timer-1");
+    l.start(7, 1000);
+    l.setLogEnabled(false);
+    const ops = l.begin(null, 2000);
+    expect(closeOps(ops)).toEqual([{ type: "close", timerLabel: "timer-1", endMs: 2000 }]);
+    expect(l.activityId).toBeNull();
+    expect(l.openKind).toBeNull();
+  });
+
+  it("begin closes a leftover break block and keeps activity cleared", () => {
+    const l = new ActivityLogger("timer-1");
+    l.start(7, 1000);
+    l.pause(2000);
+    expect(l.openKind).toBe("break");
+    const ops = l.begin(null, 3000);
+    expect(closeOps(ops)).toEqual([{ type: "close", timerLabel: "timer-1", endMs: 3000 }]);
+    expect(l.openKind).toBeNull();
+  });
 });

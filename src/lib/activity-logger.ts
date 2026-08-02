@@ -67,6 +67,22 @@ export class ActivityLogger {
     return [{ type: "open", block: this._block(activityId, "work", startMs, null) }];
   }
 
+  begin(activityId: number | null, startMs: number): LogOp[] {
+    const ops: LogOp[] = [];
+    if (this._openKind !== null) {
+      ops.push({ type: "close", timerLabel: this._timerLabel, endMs: startMs });
+      this._openKind = null;
+    }
+    if (this._logEnabled && activityId !== null) {
+      this._activityId = activityId;
+      this._openKind = "work";
+      ops.push({ type: "open", block: this._block(activityId, "work", startMs, null) });
+    } else {
+      this._activityId = null;
+    }
+    return ops;
+  }
+
   pause(nowMs: number, kind: BlockKind = "break"): LogOp[] {
     if (this._openKind !== "work") return [];
     this._openKind = kind;

@@ -95,6 +95,12 @@ CREATE INDEX idx_blocks_start ON blocks(start_ms);
    кнопка «продолжить дело», поток блоков, «Завершить дело» + слайдеры, автопауза по
    idle, restore по `timer_label` (привязка к делу + его имя/категория в полях),
    орфан-очистка.
+   **Реализовано**: панели — отдельные всплывающие окна `task-*` / `finish-*` (см. §7);
+   поток блоков идёт через `ActivityLogger.begin/pause/resume/stop/finish` +
+   `logger-runner.executeOps`; авто-пауза по idle — `away`-блок, порог
+   `AUTO_PAUSE_IDLE_MS`; restore — `activityGetOpenBlock(timerLabel)` на mount + снэпшот
+   `activityId` как запасной вариант для остановленного, но не завершённого дела.
+   Осталось: финальный прогон в приложении, «один таймер за раз» в hub.
 3. **Дашборд** — окно, лента дня, цвета/прозрачность, навигация, редактирование.
 4. **Будущее** (только заложено в схеме, НЕ реализовывать в v1):
    - `parent_id`: главное дело + подэтапы (несколько таймеров, вложенные полосы).
@@ -115,17 +121,33 @@ CREATE INDEX idx_blocks_start ON blocks(start_ms);
 - `activity_reconcile()` → закрытие брошенных открытых блоков
 - `get_activity_db_path()` → путь для внешних инструментов/SQL-агентов
 - `create_dashboard_window()` → окно дашборда
+- `create_task_panel(timer_label, log_enabled, auto_pause, minutes)` → всплывающее окно
+  задачи `task-{timerLabel}` рядом с таймером (`PANEL_GAP`)
+- `create_finish_panel(timer_label, activity_id, activity_name)` → окно оценок
+  `finish-{timerLabel}` (слайдеры 0–100)
+- `get_panel_init()` → `PanelInit { timerLabel, logEnabled, autoPause, activityId,
+  activityName, minutes }` (pending-карта, как `get_timer_init`)
 
 ## 8. Затрагиваемые файлы
 
 - `src-tauri/Cargo.toml` — + `rusqlite` (features `bundled`)
-- `src-tauri/src/lib.rs` — команды, state, `create_dashboard_window`
-- `src-tauri/capabilities/default.json` — добавить `"dashboard"` в `windows`
-- `src/constants.ts` — `AUTO_PAUSE_IDLE_MS`, размеры дашборда, цвета брейков, маппинг оценка→opacity
+- `src-tauri/src/lib.rs` — команды, state, `create_dashboard_window`, `create_task_panel`,
+  `create_finish_panel`, `get_panel_init`
+- `src-tauri/capabilities/default.json` — добавить `"dashboard"`, `"task-*"`, `"finish-*"`
+  в `windows`
+- `src/constants.ts` — `AUTO_PAUSE_IDLE_MS`, размеры дашборда/панелей, цвета брейков,
+  маппинг оценка→opacity
 - `src/lib/activity.ts` (+ `__tests__`) — типы по образцу `session.ts`
 - `src/lib/ipc.ts`, `src/lib/events.ts` — обёртки invoke / новые события
-- `src/App.svelte` — ветка `dashboard`
-- `src/lib/TimerWidget.svelte`, `src/lib/TimerOverlay.svelte` — поля, кнопки, автопауза
+- `src/App.svelte` — ветки `task-*` / `finish-*` / `dashboard`
+- `src/lib/TimerWidget.svelte` — ActivityLogger (begin/start/pause/resume/stop/finish),
+  external control (`timer-control.ts`), автопауза по idle (`idle-pause.ts`),
+  restore по `timer_label` (`getOpenBlock`) + снапшот-`activityId`
+- `src/lib/TaskPanelWindow.svelte` / `FinishPanelWindow.svelte` — окна-панели (280×205 /
+  280×190), драйвят таймер событиями `task-start` / `task-finish` / `task-config` /
+  `request-finish`
+- `src/lib/logger-runner.ts` — `executeOps` (LogOp → БД, DI для тестов)
+- `src/lib/timer-control.ts`, `src/lib/task-panel.ts` — payload-типы и чистый prefill
 - `src/lib/Hub.svelte` — кнопка «Дашборд», блокировка второго таймера
 - `src/lib/Dashboard.svelte` — новый компонент
 

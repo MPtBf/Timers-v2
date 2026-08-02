@@ -1,26 +1,40 @@
 <script lang="ts">
   import {
     COLOR_STOPPED, COLOR_RUNNING, COLOR_PAUSED, OVERTIME_COLOR,
-    RING_BG, RING_FG, CTRL_BTN_SPACING, TIMER, SESSION,
+    RING_BG, RING_FG, CTRL_BTN_SPACING, TIMER, SESSION, AUTO_PAUSE_IDLE_MS,
   } from "../constants";
   import { TimerModel, type TimerState } from "./timer.svelte";
   import { formatClockTime } from "./format";
-  import { getIdleTime, beepSystem, flashWindow } from "./ipc";
+  import { getIdleTime, beepSystem, flashWindow, activityGetOpenBlock } from "./ipc";
   import type { TimerStateReport } from "./session";
+  import { ActivityLogger, type LogOp } from "./activity-logger";
+  import { executeOps, ipcLogRunner } from "./logger-runner";
+  import { shouldAutoPause } from "./idle-pause";
+  import type {
+    TimerControl, LogState, StartCommand, FinishCommand, ConfigCommand,
+  } from "./timer-control";
+  import { createTimerControl } from "./timer-control";
 
-  let { soundOn = true, onOvertimeChange, initial = null, onStateReport }: {
+  let { soundOn = true, onOvertimeChange, initial = null, onStateReport, timerLabel, ctrl = createTimerControl(), onLogState }: {
     soundOn?: boolean;
     onOvertimeChange?: (expired: boolean) => void;
     initial?: TimerStateReport | null;
     onStateReport?: (report: TimerStateReport) => void;
+    timerLabel: string;
+    ctrl?: TimerControl;
+    onLogState?: (state: LogState) => void;
   } = $props();
 
   let state: TimerState = $state("stopped");
   let remainingMs: number = $state(0);
   let durationMs: number = $state(0);
   let inputMinutes: number = $state(5);
+  let autoPause: boolean = $state(true);
 
   let timer = $state(new TimerModel());
+  // svelte-ignore state_referenced_locally
+  let logger = new ActivityLogger(timerLabel);
+  let lastActivityName: string | null = null;
   let isFinished = $state(false);
   let beepInterval: ReturnType<typeof setInterval> | null = $state(null);
   let flashInterval: ReturnType<typeof setInterval> | null = $state(null);
@@ -54,9 +68,26 @@
   let btnStopVisible = $derived(state === "running" || state === "paused" || isFinished);
   let btnRestartVisible = $derived(state === "running" || state === "paused" || isFinished);
 
+  function runOps(ops: LogOp[]) {
+    executeOps(ops, ipcLogRunner).catch((err) => {
+      console.error("activity log error:", err);
+    });
+  }
+
   function reportNow() {
     lastReport = performance.now();
-    onStateReport?.({ durationMs: timer.durationMs, remainingMs, state });
+    onStateReport?.({
+      durationMs: timer.durationMs,
+      remainingMs,
+      state,
+      activityId: logger.activityId ?? null,
+    });
+    onLogState?.({
+      logEnabled: logger.logEnabled,
+      autoPause,
+      activityId: logger.activityId ?? null,
+      activityName: lastActivityName,
+    });
   }
 
   function stopOvertime() {
@@ -87,6 +118,10 @@
     isFinished = false;
     stopOvertime();
     onOvertimeChange?.(false);
+    logger.setLogEnabled(false);
+    const ops = logger.begin(null, Date.now());
+    if (ops.length) runOps(ops);
+    lastActivityName = null;
     timer.setDuration(inputMinutes);
     timer.start();
     reportNow();
@@ -94,11 +129,15 @@
 
   function onPause() {
     timer.pause();
+    const ops = logger.pause(Date.now());
+    if (ops.length) runOps(ops);
     reportNow();
   }
 
   function onResume() {
     timer.resume();
+    const ops = logger.resume(Date.now());
+    if (ops.length) runOps(ops);
     reportNow();
   }
 
@@ -107,6 +146,54 @@
     stopOvertime();
     onOvertimeChange?.(false);
     timer.stop();
+    const ops = logger.stop(Date.now());
+    if (ops.length) runOps(ops);
+    reportNow();
+  }
+
+  function onIdlePause() {
+    timer.pause();
+    const ops = logger.pause(Date.now(), "away");
+    if (ops.length) runOps(ops);
+    reportNow();
+  }
+
+  function startExternal(cmd: StartCommand) {
+    if (cmd.minutes <= 0) return;
+    isFinished = false;
+    stopOvertime();
+    onOvertimeChange?.(false);
+    logger.setLogEnabled(cmd.logEnabled);
+    autoPause = cmd.autoPause;
+    inputMinutes = cmd.minutes;
+    const ops = logger.begin(cmd.activityId, Date.now());
+    if (ops.length) runOps(ops);
+    lastActivityName = cmd.activityName;
+    timer.setDuration(cmd.minutes);
+    timer.start();
+    reportNow();
+  }
+
+  function finishExternal(cmd: FinishCommand) {
+    const ops = logger.finish(cmd.efficiency, cmd.usefulness, cmd.endedMs);
+    if (ops.length) runOps(ops);
+    lastActivityName = null;
+    isFinished = false;
+    stopOvertime();
+    onOvertimeChange?.(false);
+    timer.stop();
+    reportNow();
+  }
+
+  function applyConfig(cmd: ConfigCommand) {
+    autoPause = cmd.autoPause;
+    if (cmd.logEnabled !== logger.logEnabled) {
+      if (!cmd.logEnabled && logger.hasOpenBlock) {
+        const ops = logger.stop(Date.now());
+        if (ops.length) runOps(ops);
+      }
+      logger.setLogEnabled(cmd.logEnabled);
+    }
     reportNow();
   }
 
@@ -136,7 +223,83 @@
   });
 
   $effect(() => {
-    return () => { stopOvertime(); timer.destroy(); };
+    let cancelled = false;
+    activityGetOpenBlock(timerLabel).then((row) => {
+      if (cancelled) return;
+      if (row && row.activityId !== null) {
+        logger.restore(row.activityId, row.kind);
+        lastActivityName = row.activityName;
+      } else if (row) {
+        logger.restore(initial?.activityId ?? null, row.kind);
+        lastActivityName = row.activityName ?? null;
+      } else if (initial?.activityId != null) {
+        logger.restore(initial.activityId, null);
+        lastActivityName = null;
+      }
+      reportNow();
+    }).catch((err) => {
+      console.error("getOpenBlock restore error:", err);
+      if (initial?.activityId != null) {
+        logger.restore(initial.activityId, null);
+        lastActivityName = null;
+        reportNow();
+      }
+    });
+    return () => { cancelled = true; };
+  });
+
+  $effect(() => {
+    const idp = setInterval(() => {
+      if (state !== "running" || !autoPause || isFinished) return;
+      getIdleTime().then((idleMs) => {
+        if (shouldAutoPause({ state, autoPause, idleMs, thresholdMs: AUTO_PAUSE_IDLE_MS, overtime: isFinished })) {
+          onIdlePause();
+        }
+      }).catch(() => {});
+    }, 1000);
+    return () => clearInterval(idp);
+  });
+
+  $effect(() => {
+    const startCmd = ctrl.start;
+    if (startCmd) {
+      ctrl.start = null;
+      startExternal(startCmd);
+    }
+  });
+
+  $effect(() => {
+    const finishCmd = ctrl.finish;
+    if (finishCmd) {
+      ctrl.finish = null;
+      finishExternal(finishCmd);
+    }
+  });
+
+  $effect(() => {
+    const configCmd = ctrl.config;
+    if (configCmd) {
+      ctrl.config = null;
+      applyConfig(configCmd);
+    }
+  });
+
+  $effect(() => {
+    const handler = () => {
+      const ops = logger.stop(Date.now());
+      if (ops.length) runOps(ops);
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  });
+
+  $effect(() => {
+    return () => {
+      stopOvertime();
+      timer.destroy();
+      const ops = logger.stop(Date.now());
+      if (ops.length) runOps(ops);
+    };
   });
 </script>
 
