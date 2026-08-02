@@ -151,6 +151,7 @@
           durationMs: snap.durationMs,
           remainingMs: snap.remainingMs,
           state: snap.state,
+          activityId: snap.activityId ?? null,
         };
       }
     });
@@ -172,15 +173,19 @@
       reportSnapshot();
     }));
     unlistens.push(listen<StartCommand>(EVT_TASK_START, (e) => {
+      if (e.payload.timerLabel !== win.label) return;
       ctrl.start = e.payload;
     }));
     unlistens.push(listen<FinishCommand>(EVT_TASK_FINISH, (e) => {
+      if (e.payload.timerLabel !== win.label) return;
       ctrl.finish = e.payload;
     }));
     unlistens.push(listen<ConfigCommand>(EVT_TASK_CONFIG, (e) => {
+      if (e.payload.timerLabel !== win.label) return;
       ctrl.config = e.payload;
     }));
     unlistens.push(listen<RequestFinishCommand>(EVT_REQUEST_FINISH, (e) => {
+      if (e.payload.timerLabel !== win.label) return;
       openFinishPanel(e.payload.activityId, e.payload.activityName);
     }));
     return () => {

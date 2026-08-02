@@ -55,4 +55,10 @@ describe("session serialization", () => {
     const text = JSON.stringify({ version: 1, timers: [base, bad] });
     expect(parseSession(text)).toEqual([base]);
   });
+
+  it("rounds float durationMs/remainingMs to integers", () => {
+    const floaty = { ...base, durationMs: 300000.1, remainingMs: 269894.6999999881 };
+    const text = JSON.stringify({ version: 1, timers: [floaty] });
+    expect(parseSession(text)).toEqual([{ ...base, durationMs: 300000, remainingMs: 269895 }]);
+  });
 });

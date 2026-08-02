@@ -1,4 +1,5 @@
 export interface StartCommand {
+  timerLabel: string;
   minutes: number;
   activityId: number | null;
   activityName: string | null;
@@ -7,6 +8,7 @@ export interface StartCommand {
 }
 
 export interface FinishCommand {
+  timerLabel: string;
   activityId: number;
   efficiency: number;
   usefulness: number;
@@ -14,6 +16,7 @@ export interface FinishCommand {
 }
 
 export interface ConfigCommand {
+  timerLabel: string;
   logEnabled: boolean;
   autoPause: boolean;
 }
@@ -26,6 +29,7 @@ export interface LogState {
 }
 
 export interface RequestFinishCommand {
+  timerLabel: string;
   activityId: number | null;
   activityName: string | null;
 }

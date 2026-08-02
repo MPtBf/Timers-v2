@@ -10,7 +10,7 @@
   import { panelTimerLabel } from "./windows";
   import { EVT_TASK_START, EVT_TASK_CONFIG, EVT_REQUEST_FINISH } from "./events";
   import { computeTaskPrefill } from "./task-panel";
-  import type { ActivitySummary, Suggestions } from "./activity";
+  import type { Suggestions } from "./activity";
 
   const win = getCurrentWindow();
   const timerLabel = panelTimerLabel(win.label) ?? "";
@@ -49,12 +49,12 @@
 
   function onLogEnabled(v: boolean) {
     logEnabled = v;
-    emitTo(timerLabel, EVT_TASK_CONFIG, { logEnabled, autoPause }).catch(() => {});
+    emitTo(timerLabel, EVT_TASK_CONFIG, { timerLabel, logEnabled, autoPause }).catch(() => {});
   }
 
   function onAutoPause(v: boolean) {
     autoPause = v;
-    emitTo(timerLabel, EVT_TASK_CONFIG, { logEnabled, autoPause }).catch(() => {});
+    emitTo(timerLabel, EVT_TASK_CONFIG, { timerLabel, logEnabled, autoPause }).catch(() => {});
   }
 
   function onContinue(id: number) {
@@ -92,6 +92,7 @@
         }
       }
       await emitTo(timerLabel, EVT_TASK_START, {
+        timerLabel,
         minutes,
         activityId,
         activityName: logEnabled ? name.trim() : null,
@@ -106,6 +107,7 @@
 
   function onFinish() {
     emitTo(timerLabel, EVT_REQUEST_FINISH, {
+      timerLabel,
       activityId: boundActivityId,
       activityName: name.trim() || null,
     }).catch((err) => console.error("request-finish emit error:", err));

@@ -34,7 +34,12 @@ export function parseSession(text: string): TimerSnapshot[] | null {
     if (!data || data.version !== 1 || !Array.isArray(data.timers)) return null;
     return data.timers
       .filter(isValidSnapshot)
-      .map((t) => ({ ...t, activityId: t.activityId ?? null }));
+      .map((t) => ({
+        ...t,
+        durationMs: Math.round(t.durationMs),
+        remainingMs: Math.round(t.remainingMs),
+        activityId: t.activityId ?? null,
+      }));
   } catch {
     return null;
   }

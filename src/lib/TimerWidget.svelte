@@ -77,8 +77,8 @@
   function reportNow() {
     lastReport = performance.now();
     onStateReport?.({
-      durationMs: timer.durationMs,
-      remainingMs,
+      durationMs: Math.round(timer.durationMs),
+      remainingMs: Math.round(remainingMs),
       state,
       activityId: logger.activityId ?? null,
     });

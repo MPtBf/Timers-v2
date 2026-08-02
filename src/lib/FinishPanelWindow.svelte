@@ -21,6 +21,7 @@
   function onSave() {
     if (activityId === null) return;
     emitTo(timerLabel, EVT_TASK_FINISH, {
+      timerLabel,
       activityId,
       efficiency,
       usefulness,
