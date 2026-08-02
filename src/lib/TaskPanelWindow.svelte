@@ -6,10 +6,10 @@
   import {
     TASK_PANEL_WIDTH, TASK_PANEL_HEIGHT,
   } from "../constants";
-  import { getPanelInit, activitySuggestions, activityGetOpenBlock, activityUpsert } from "./ipc";
+  import { getPanelInit, activitySuggestions, activityGetOpenBlock, activityUpsert, activityGetGlobalOpenBlock } from "./ipc";
   import { panelTimerLabel } from "./windows";
   import { EVT_TASK_START, EVT_TASK_CONFIG, EVT_REQUEST_FINISH } from "./events";
-  import { computeTaskPrefill } from "./task-panel";
+  import { computeTaskPrefill, dealBlockedMessage } from "./task-panel";
   import type { Suggestions } from "./activity";
 
   const win = getCurrentWindow();
@@ -23,6 +23,7 @@
   let autoPause = $state(true);
   let boundActivityId = $state<number | null>(null);
   let suggestions = $state<Suggestions | null>(null);
+  let blockError = $state<string | null>(null);
 
   let continueActivities = $derived(
     (suggestions?.activities ?? []).filter((a) => a.status === "finished")
@@ -69,9 +70,16 @@
 
   async function onStart() {
     if (minutes <= 0) return;
+    blockError = null;
+    let activityId: number | null = null;
     try {
-      let activityId: number | null = null;
       if (logEnabled) {
+        const globalOpen = await activityGetGlobalOpenBlock();
+        const blocked = dealBlockedMessage(globalOpen, timerLabel);
+        if (blocked !== null) {
+          blockError = blocked;
+          return;
+        }
         if (!name.trim()) return;
         if (boundActivityId === null) {
           activityId = await activityUpsert({
@@ -155,4 +163,5 @@
   onStart={onStart}
   onContinue={onContinue}
   onFinish={onFinish}
+  error={blockError}
 />

@@ -515,6 +515,14 @@ fn activity_get_open_block(
 }
 
 #[tauri::command]
+fn activity_get_global_open_block(
+    state: State<'_, ActivityDb>,
+) -> Result<Option<activity::ActivityBlockRow>, String> {
+    let conn = state.0.lock().unwrap();
+    activity::get_global_open_block(&conn)
+}
+
+#[tauri::command]
 fn activity_suggestions(state: State<'_, ActivityDb>) -> Result<activity::Suggestions, String> {
     let conn = state.0.lock().unwrap();
     activity::suggestions(&conn)
@@ -645,6 +653,7 @@ pub fn run() {
             activity_delete_activity,
             activity_query,
             activity_get_open_block,
+            activity_get_global_open_block,
             activity_suggestions,
             activity_reconcile,
             quit_all,

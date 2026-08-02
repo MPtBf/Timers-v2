@@ -48,7 +48,6 @@
   }
 
   async function newTimer() {
-    if (timers.length >= 1) return;
     try {
       const pos = await getCurrentWindow().outerPosition();
       const count = timers.length;
@@ -126,7 +125,7 @@
 >
   <header>
     <h1>Timers</h1>
-    <button class="new-btn" disabled={timers.length >= 1} title={timers.length >= 1 ? "Только один таймер в v1" : "Создать таймер"} onclick={newTimer}>+ New</button>
+    <button class="new-btn" onclick={newTimer} title="Создать таймер">+ New</button>
   </header>
 
   <div class="toolbar">

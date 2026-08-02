@@ -156,6 +156,10 @@ export async function activityGetOpenBlock(timerLabel: string): Promise<Activity
   return await invoke<ActivityBlockRow | null>("activity_get_open_block", { timerLabel });
 }
 
+export async function activityGetGlobalOpenBlock(): Promise<ActivityBlockRow | null> {
+  return await invoke<ActivityBlockRow | null>("activity_get_global_open_block");
+}
+
 export async function activitySuggestions(): Promise<Suggestions> {
   return await invoke<Suggestions>("activity_suggestions");
 }

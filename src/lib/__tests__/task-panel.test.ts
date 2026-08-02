@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeTaskPrefill } from "../task-panel";
+import { computeTaskPrefill, dealBlockedMessage } from "../task-panel";
 import type { ActivityBlockRow } from "../activity";
 
 const workRow = (over: Partial<ActivityBlockRow> = {}): ActivityBlockRow => ({
@@ -84,5 +84,22 @@ describe("computeTaskPrefill", () => {
     expect(got.activityId).toBe(5);
     expect(got.canContinue).toBe(false);
     expect(got.name).toBe("");
+  });
+});
+
+describe("dealBlockedMessage", () => {
+  it("returns null when no global open block", () => {
+    expect(dealBlockedMessage(null, "timer-1")).toBeNull();
+  });
+
+  it("returns null when the global open block belongs to this timer", () => {
+    const mine = workRow({ timerLabel: "timer-1" });
+    expect(dealBlockedMessage(mine, "timer-1")).toBeNull();
+  });
+
+  it("returns a message when another timer holds the open block", () => {
+    const theirs = workRow({ timerLabel: "timer-2" });
+    const msg = dealBlockedMessage(theirs, "timer-1");
+    expect(msg).toContain("timer-2");
   });
 });

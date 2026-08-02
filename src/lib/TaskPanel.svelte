@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { BTN_BG, BG_PANEL, BORDER_COLOR, TEXT_COLOR, TEXT_DIM, ACCENT_BG, ACCENT_FG } from "../constants";
+  import { BTN_BG, BG_PANEL, BORDER_COLOR, TEXT_COLOR, TEXT_DIM, ACCENT_BG, ACCENT_FG, OVERTIME_COLOR } from "../constants";
   import type { ActivitySummary, Suggestions } from "./activity";
 
   let {
@@ -21,6 +21,7 @@
     onStart,
     onContinue,
     onFinish,
+    error = null,
   }: {
     minutes: number;
     category: string;
@@ -40,6 +41,7 @@
     onStart: () => void;
     onContinue: (id: number) => void;
     onFinish: () => void;
+    error?: string | null;
   } = $props();
 </script>
 
@@ -126,6 +128,9 @@
       </select>
     </div>
   {/if}
+  {#if error}
+    <div class="row error-line" style="color: {OVERTIME_COLOR};">{error}</div>
+  {/if}
   <div class="row actions">
     <button class="btn primary" onclick={onStart} style="background: {ACCENT_BG}; color: {ACCENT_FG}; border: none;">▶ Старт</button>
     {#if canFinish}
@@ -165,6 +170,11 @@
   .checks {
     gap: 12px;
     align-items: center;
+  }
+  .error-line {
+    font-size: 10px;
+    line-height: 1.2;
+    word-break: break-word;
   }
   .check {
     display: flex;

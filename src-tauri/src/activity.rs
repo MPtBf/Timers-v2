@@ -166,16 +166,16 @@ pub fn upsert_activity(conn: &mut Connection, activity: &Activity) -> Result<i64
 pub fn open_block(conn: &mut Connection, block: &Block) -> Result<i64, String> {
     validate_kind(&block.kind)?;
     let activity_id = effective_activity_id(block)?;
-    let existing: Option<i64> = conn
+    let owner: Option<String> = conn
         .query_row(
-            "SELECT id FROM blocks WHERE timer_label=?1 AND end_ms IS NULL",
-            params![block.timer_label],
+            "SELECT timer_label FROM blocks WHERE end_ms IS NULL",
+            [],
             |row| row.get(0),
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    if existing.is_some() {
-        return Err(format!("timer {} already has an open block", block.timer_label));
+    if let Some(label) = owner {
+        return Err(format!("timer {label} already has an open block"));
     }
     conn.execute(
         "INSERT INTO blocks (activity_id, kind, start_ms, end_ms, timer_label)
@@ -331,6 +331,24 @@ pub fn get_open_block(conn: &Connection, timer_label: &str) -> Result<Option<Act
         .map_err(|e| e.to_string())?;
     let mut rows = stmt
         .query_map(params![timer_label], row_to_activity_block)
+        .map_err(|e| e.to_string())?;
+    rows.next().transpose().map_err(|e| e.to_string())
+}
+
+pub fn get_global_open_block(conn: &Connection) -> Result<Option<ActivityBlockRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT b.id, b.activity_id, b.kind, b.start_ms, b.end_ms, b.timer_label,
+                    a.name, a.category, a.tags, a.status, a.efficiency, a.usefulness, a.log_enabled
+             FROM blocks b
+             LEFT JOIN activities a ON a.id = b.activity_id
+             WHERE b.end_ms IS NULL
+             ORDER BY b.id
+             LIMIT 1",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query_map([], row_to_activity_block)
         .map_err(|e| e.to_string())?;
     rows.next().transpose().map_err(|e| e.to_string())
 }
@@ -583,6 +601,53 @@ mod tests {
     }
 
     #[test]
+    fn open_block_on_second_timer_while_another_has_open_block_errors() {
+        let mut conn = db();
+        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
+        open_block(&mut conn, &work_block("timer-1", Some(id), 0, None)).unwrap();
+        let err = open_block(&mut conn, &work_block("timer-2", Some(id), 100, None)).unwrap_err();
+        assert!(err.contains("timer-1"));
+        assert!(err.contains("open block"));
+    }
+
+    #[test]
+    fn open_block_allowed_after_other_timer_closes() {
+        let mut conn = db();
+        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
+        open_block(&mut conn, &work_block("timer-1", Some(id), 0, None)).unwrap();
+        close_block(&mut conn, "timer-1", 50).unwrap();
+        let b2 = open_block(&mut conn, &work_block("timer-2", Some(id), 100, None)).unwrap();
+        let got = get_global_open_block(&conn).unwrap().unwrap();
+        assert_eq!(got.id, b2);
+        assert_eq!(got.timer_label, "timer-2");
+    }
+
+    #[test]
+    fn get_global_open_block_returns_single_open_any_timer() {
+        let mut conn = db();
+        assert_eq!(get_global_open_block(&conn).unwrap(), None);
+        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
+        let b = open_block(&mut conn, &work_block("timer-1", Some(id), 0, None)).unwrap();
+        let got = get_global_open_block(&conn).unwrap().unwrap();
+        assert_eq!(got.id, b);
+        assert_eq!(got.activity_name.as_deref(), Some("Парсер"));
+        close_block(&mut conn, "timer-1", 50).unwrap();
+        assert_eq!(get_global_open_block(&conn).unwrap(), None);
+    }
+
+    #[test]
+    fn pause_break_block_replaces_work_within_same_timer() {
+        let mut conn = db();
+        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
+        open_block(&mut conn, &work_block("timer-1", Some(id), 0, None)).unwrap();
+        close_block(&mut conn, "timer-1", 50).unwrap();
+        open_block(&mut conn, &break_block("timer-1", 50, None)).unwrap();
+        let got = get_global_open_block(&conn).unwrap().unwrap();
+        assert_eq!(got.kind, KIND_BREAK);
+        assert_eq!(got.activity_id, None);
+    }
+
+    #[test]
     fn open_block_rejects_bad_kind() {
         let mut conn = db();
         let mut b = break_block("timer-1", 0, None);
@@ -720,7 +785,19 @@ mod tests {
         let mut conn = db();
         let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
         let stale = open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
+        close_block(&mut conn, "timer-1", 1_500).unwrap();
         let fresh = open_block(&mut conn, &work_block("timer-2", Some(id), 8_000, None)).unwrap();
+        close_block(&mut conn, "timer-2", 8_500).unwrap();
+        conn.execute(
+            "INSERT INTO blocks (activity_id, kind, start_ms, end_ms, timer_label) VALUES (?1, 'work', ?2, NULL, 'timer-3')",
+            params![id, 2_000],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (activity_id, kind, start_ms, end_ms, timer_label) VALUES (?1, 'work', ?2, NULL, 'timer-4')",
+            params![id, 9_000],
+        )
+        .unwrap();
 
         let closed = reconcile(&mut conn, 5_000).unwrap();
         assert_eq!(closed, 1);
@@ -732,7 +809,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(stale_end, Some(1_000));
+        assert_eq!(stale_end, Some(1_500));
         let fresh_end: Option<i64> = conn
             .query_row(
                 "SELECT end_ms FROM blocks WHERE id=?1",
@@ -740,7 +817,23 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(fresh_end, None);
+        assert_eq!(fresh_end, Some(8_500));
+        let legacy_stale_end: Option<i64> = conn
+            .query_row(
+                "SELECT end_ms FROM blocks WHERE timer_label='timer-3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_stale_end, Some(2_000));
+        let legacy_fresh_end: Option<i64> = conn
+            .query_row(
+                "SELECT end_ms FROM blocks WHERE timer_label='timer-4'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_fresh_end, None);
     }
 
     #[test]

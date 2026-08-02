@@ -10,6 +10,16 @@ export interface TaskPrefill {
   canContinue: boolean;
 }
 
+export function dealBlockedMessage(
+  globalOpenBlock: ActivityBlockRow | null,
+  timerLabel: string
+): string | null {
+  if (globalOpenBlock !== null && globalOpenBlock.timerLabel !== timerLabel) {
+    return `Дело уже открыто на таймере ${globalOpenBlock.timerLabel}`;
+  }
+  return null;
+}
+
 export function computeTaskPrefill(
   openBlock: ActivityBlockRow | null,
   autoPauseDefault: boolean
