@@ -65,10 +65,13 @@ src-tauri/
 > always-on-top only when `pinned` or overtime is active. Created from Rust via
 > `create_timer_window`. Visible in taskbar and Alt-Tab (`skip_taskbar(false)`) so timers are
 > reachable without the hub.
-> **Panel windows**: label `task-{timerLabel}` / `finish-{timerLabel}`, 280×205 / 280×190,
+> **Panel windows**: label `task-{timerLabel}` / `finish-{timerLabel}`, 280×219 / 280×204
+> (includes a 14px draggable top strip, `PANEL_DRAG_STRIP_HEIGHT`),
 > `decorations:false`, `transparent:true`, `always_on_top:true`, `skip_taskbar:true`,
-> positioned beside the timer (`PANEL_GAP`). Created via `create_task_panel` /
-> `create_finish_panel`; they fetch `PanelInit` through `get_panel_init` (pending map, same
+> positioned **above the timer, horizontally centered** (`panel_position`: centered over
+> `timer-*`, clamped to the monitor; falls back below the timer when there's no room above).
+> Created via `create_task_panel` / `create_finish_panel`; they fetch `PanelInit` through
+> `get_panel_init` (pending map, same
 > pattern as `get_timer_init`). Panels drive the timer window via Tauri events
 > (`task-start`, `task-finish`, `task-config`, `request-finish`); ALL DB mutations flow
 > through `TimerWidget`'s `ActivityLogger` + `logger-runner` (single source of truth).
@@ -191,11 +194,8 @@ Rust provides `get_modifier_state` (Ctrl/Shift via `GetAsyncKeyState`) and
   window via `apply_dwm` command on mount
   (`DWMWA_NCRENDERING_POLICY=2`, `DWMWA_ALLOW_NCPAINT=0`).
 - **Z-order / taskbar activation**: Windows raises ALL visible windows of a process when one
-  is activated from the taskbar/Alt-Tab. Fix: only the hub lowers all timers
-  (`lower_timers_except("hub")`) via `SetWindowPos(HWND_BOTTOM)` on `Focused(true)`. Timer
-  focus does NOT lower the others — clicking a timer must not hide its neighbors (use
-  Ctrl-held interaction mode to click). Freshly created windows are protected by a 2s
-  birth-time grace (`BirthTimes`, `BIRTH_GRACE_MS`).
+  is activated from the taskbar/Alt-Tab. Timer focus does NOT lower the others — clicking a
+  timer must not hide its neighbors (use Ctrl-held interaction mode to click).
 - **`apply_window_style` must not touch z-order**: it calls `SetWindowPos(None, …
   SWP_NOZORDER | SWP_FRAMECHANGED)` only when the `WS_EX_TRANSPARENT` flag changes (nudge
   flag) and runs only on real opacity/click-through changes, never with `HWND_TOP`. A

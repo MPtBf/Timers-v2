@@ -127,7 +127,7 @@ CREATE INDEX idx_blocks_start ON blocks(start_ms);
 - `get_activity_db_path()` → путь для внешних инструментов/SQL-агентов
 - `create_dashboard_window()` → окно дашборда
 - `create_task_panel(timer_label, log_enabled, auto_pause, minutes)` → всплывающее окно
-  задачи `task-{timerLabel}` рядом с таймером (`PANEL_GAP`)
+  задачи `task-{timerLabel}` над таймером (по центру, `panel_position`), с драг-полосой сверху
 - `create_finish_panel(timer_label, activity_id, activity_name)` → окно оценок
   `finish-{timerLabel}` (слайдеры 0–100)
 - `get_panel_init()` → `PanelInit { timerLabel, logEnabled, autoPause, activityId,
@@ -148,8 +148,8 @@ CREATE INDEX idx_blocks_start ON blocks(start_ms);
 - `src/lib/TimerWidget.svelte` — ActivityLogger (begin/start/pause/resume/stop/finish),
   external control (`timer-control.ts`), автопауза по idle (`idle-pause.ts`),
   restore по `timer_label` (`getOpenBlock`) + снапшот-`activityId`
-- `src/lib/TaskPanelWindow.svelte` / `FinishPanelWindow.svelte` — окна-панели (280×205 /
-  280×190), драйвят таймер событиями `task-start` / `task-finish` / `task-config` /
+- `src/lib/TaskPanelWindow.svelte` / `FinishPanelWindow.svelte` — окна-панели (280×219 /
+  280×204, драг-полоса сверху), драйвят таймер событиями `task-start` / `task-finish` / `task-config` /
   `request-finish`
 - `src/lib/logger-runner.ts` — `executeOps` (LogOp → БД, DI для тестов)
 - `src/lib/timer-control.ts`, `src/lib/task-panel.ts` — payload-типы и чистый prefill

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Mutex;
-use std::time::Instant;
 
 mod activity;
 
@@ -21,7 +20,7 @@ use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::WindowsAndMessaging::{
     FlashWindowEx, FLASHWINFO, FLASHW_ALL, FLASHW_TIMERNOFG,
     GetWindowLongW, SetWindowLongW, SetWindowPos,
-    GWL_EXSTYLE, HWND_BOTTOM, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_NOZORDER, SWP_FRAMECHANGED,
+    GWL_EXSTYLE, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_NOZORDER, SWP_FRAMECHANGED,
     WINDOW_EX_STYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
     SetLayeredWindowAttributes, LWA_ALPHA,
 };
@@ -35,9 +34,9 @@ const SESSION_TMP_FILE: &str = "session.json.tmp";
 const DEFAULT_W: f64 = 95.0;
 const DEFAULT_H: f64 = 96.0;
 const TASK_PANEL_W: f64 = 280.0;
-const TASK_PANEL_H: f64 = 205.0;
+const TASK_PANEL_H: f64 = 219.0;
 const FINISH_PANEL_W: f64 = 280.0;
-const FINISH_PANEL_H: f64 = 190.0;
+const FINISH_PANEL_H: f64 = 204.0;
 const PANEL_GAP: f64 = 6.0;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -71,11 +70,8 @@ struct PanelInit {
 
 struct PendingPanelInit(Mutex<HashMap<String, PanelInit>>);
 
-struct BirthTimes(Mutex<HashMap<String, Instant>>);
-
 struct ActivityDb(Mutex<rusqlite::Connection>);
 
-const BIRTH_GRACE_MS: u64 = 2000;
 const RECONCILE_STALE_MS: i64 = 300_000;
 
 fn now_ms() -> i64 {
@@ -83,18 +79,6 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
-}
-
-fn lower_timers_except(app: &tauri::AppHandle, stay: &str) {
-    for (label, win) in app.webview_windows() {
-        if label != stay && is_timer_label(&label) {
-            let h = hwnd(&win);
-            unsafe {
-                let _ = SetWindowPos(h, Some(HWND_BOTTOM), 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            }
-        }
-    }
 }
 
 fn hwnd(window: &tauri::WebviewWindow) -> HWND {
@@ -265,10 +249,41 @@ fn get_timer_init(window: WebviewWindow, state: State<PendingInit>) -> Option<Ti
     state.0.lock().unwrap().remove(&label)
 }
 
-fn panel_position(app: &tauri::AppHandle, timer_label: &str) -> (f64, f64) {
+fn panel_position(
+    app: &tauri::AppHandle,
+    timer_label: &str,
+    panel_w: f64,
+    panel_h: f64,
+) -> (f64, f64) {
     if let Some(win) = app.get_webview_window(timer_label) {
         if let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) {
-            return (pos.x as f64 + size.width as f64 + PANEL_GAP, pos.y as f64);
+            let scale = win.scale_factor().unwrap_or(1.0);
+            let timer_x = pos.x as f64 / scale;
+            let timer_y = pos.y as f64 / scale;
+            let timer_w = size.width as f64 / scale;
+            let timer_h = size.height as f64 / scale;
+            let (min_x, min_y, max_x, max_y) = match win.current_monitor() {
+                Ok(Some(m)) => {
+                    let p = m.position();
+                    let s = m.size();
+                    (
+                        p.x as f64 / scale,
+                        p.y as f64 / scale,
+                        (p.x as f64 + s.width as f64) / scale,
+                        (p.y as f64 + s.height as f64) / scale,
+                    )
+                }
+                _ => (0.0, 0.0, 1920.0, 1080.0),
+            };
+            let center_x = timer_x + timer_w / 2.0;
+            let x = (center_x - panel_w / 2.0).clamp(min_x, (max_x - panel_w).max(min_x));
+            let above_y = timer_y - panel_h - PANEL_GAP;
+            let y = if above_y >= min_y {
+                above_y
+            } else {
+                (timer_y + timer_h + PANEL_GAP).clamp(min_y, (max_y - panel_h).max(min_y))
+            };
+            return (x, y);
         }
     }
     (PANEL_GAP + 140.0, PANEL_GAP + 140.0)
@@ -286,7 +301,7 @@ fn create_panel_window(
     if app.get_webview_window(label).is_some() {
         return Ok(());
     }
-    let (x, y) = panel_position(app, &init.timer_label);
+    let (x, y) = panel_position(app, &init.timer_label, width, height);
     pending.0.lock().unwrap().insert(label.to_string(), init);
     let url = WebviewUrl::App(format!("index.html{query}").into());
     WebviewWindowBuilder::new(app, label.to_string(), url)
@@ -619,7 +634,6 @@ pub fn run() {
         )
         .manage(PendingInit(Mutex::new(HashMap::new())))
         .manage(PendingPanelInit(Mutex::new(HashMap::new())))
-        .manage(BirthTimes(Mutex::new(HashMap::new())))
         .invoke_handler(tauri::generate_handler![
             set_click_through,
             set_opacity,
@@ -689,25 +703,10 @@ pub fn run() {
 
             if let Some(hub) = app.get_webview_window(HUB_LABEL) {
                 let hub_for_close = hub.clone();
-                let app_handle = app.handle().clone();
-                app.state::<BirthTimes>().0.lock().unwrap().insert(HUB_LABEL.to_string(), Instant::now());
                 hub.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
                         let _ = hub_for_close.hide();
-                    }
-                    if let WindowEvent::Focused(true) = event {
-                        let recent = app_handle
-                            .state::<BirthTimes>()
-                            .0
-                            .lock()
-                            .unwrap()
-                            .get(HUB_LABEL)
-                            .map(|t| t.elapsed().as_millis() < BIRTH_GRACE_MS as u128)
-                            .unwrap_or(false);
-                        if !recent {
-                            lower_timers_except(&app_handle, HUB_LABEL);
-                        }
                     }
                 });
             }

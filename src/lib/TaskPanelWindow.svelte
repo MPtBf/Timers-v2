@@ -4,7 +4,7 @@
   import { emitTo } from "@tauri-apps/api/event";
   import TaskPanel from "./TaskPanel.svelte";
   import {
-    TASK_PANEL_WIDTH, TASK_PANEL_HEIGHT,
+    TASK_PANEL_WIDTH, TASK_PANEL_HEIGHT, PANEL_DRAG_STRIP_HEIGHT, PANEL_STRIP_BG, PANEL_STRIP_HOVER,
   } from "../constants";
   import { getPanelInit, activitySuggestions, activityGetOpenBlock, activityUpsert, activityGetGlobalOpenBlock } from "./ipc";
   import { panelTimerLabel } from "./windows";
@@ -144,24 +144,60 @@
   });
 </script>
 
-<TaskPanel
-  {minutes}
-  {category}
-  {name}
-  {tags}
-  {logEnabled}
-  {autoPause}
-  {suggestions}
-  {continueActivities}
-  {canFinish}
-  onMinutes={onMinutes}
-  onCategory={onCategory}
-  onName={onName}
-  onTags={onTags}
-  onLogEnabled={onLogEnabled}
-  onAutoPause={onAutoPause}
-  onStart={onStart}
-  onContinue={onContinue}
-  onFinish={onFinish}
-  error={blockError}
-/>
+<div class="panel-root" style="--strip-h: {PANEL_DRAG_STRIP_HEIGHT}px; --strip-bg: {PANEL_STRIP_BG}; --strip-hover: {PANEL_STRIP_HOVER};">
+  <div
+    class="drag-strip"
+    role="button"
+    tabindex="0"
+    aria-label="Drag panel"
+    onmousedown={(e) => {
+      e.preventDefault();
+      win.startDragging().catch((err) => console.error("startDragging failed:", err));
+    }}
+  ></div>
+  <div class="panel-body">
+    <TaskPanel
+      {minutes}
+      {category}
+      {name}
+      {tags}
+      {logEnabled}
+      {autoPause}
+      {suggestions}
+      {continueActivities}
+      {canFinish}
+      onMinutes={onMinutes}
+      onCategory={onCategory}
+      onName={onName}
+      onTags={onTags}
+      onLogEnabled={onLogEnabled}
+      onAutoPause={onAutoPause}
+      onStart={onStart}
+      onContinue={onContinue}
+      onFinish={onFinish}
+      error={blockError}
+    />
+  </div>
+</div>
+
+<style>
+  .panel-root {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+  }
+  .drag-strip {
+    flex-shrink: 0;
+    height: var(--strip-h);
+    background: var(--strip-bg);
+    cursor: grab;
+  }
+  .drag-strip:hover {
+    background: var(--strip-hover);
+  }
+  .panel-body {
+    flex: 1;
+    min-height: 0;
+  }
+</style>
