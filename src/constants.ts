@@ -45,8 +45,8 @@ export const TASK_NAME_COLOR = TEXT_DIM;
 export const DASHBOARD = {
   hourRows: 18,
   dayStartHour: 6,
-  blockSaturation: 80,
-  blockLightness: 50,
+  blockSaturation: 70,
+  blockLightness: 30,
   todayHeaderBg: "#1f3d2a",
   timeLabelWidth: 28,
 };
