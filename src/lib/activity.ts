@@ -1,3 +1,5 @@
+import { DASHBOARD } from "../constants";
+
 export interface Block {
   id: number;
   name: string;
@@ -90,9 +92,9 @@ export function blockHue(name: string): number {
   return ((hash % 360) + 360) % 360;
 }
 
-/** Deterministic HSL color for a block name (S=80%, L=50%). */
+/** Deterministic HSL color for a block name (saturation/lightness from `DASHBOARD`). */
 export function blockColor(name: string): string {
-  return `hsl(${blockHue(name)}, 70%, 30%)`;
+  return `hsl(${blockHue(name)}, ${DASHBOARD.blockSaturation}%, ${DASHBOARD.blockLightness}%)`;
 }
 
 export interface Debouncer {
