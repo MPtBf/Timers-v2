@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { isTimerLabel, timerIdFromLabel, timerLabel, HUB_LABEL } from "../windows";
+import {
+  isTimerLabel,
+  isDashboardLabel,
+  timerIdFromLabel,
+  timerLabel,
+  HUB_LABEL,
+  DASHBOARD_LABEL,
+} from "../windows";
 
 describe("window label helpers", () => {
   it("identifies hub as non-timer", () => {
@@ -22,5 +29,11 @@ describe("window label helpers", () => {
 
   it("builds label from id", () => {
     expect(timerLabel(7)).toBe("timer-7");
+  });
+
+  it("identifies the dashboard label", () => {
+    expect(isDashboardLabel(DASHBOARD_LABEL)).toBe(true);
+    expect(isDashboardLabel("hub")).toBe(false);
+    expect(isDashboardLabel("timer-1")).toBe(false);
   });
 });

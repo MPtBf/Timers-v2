@@ -9,6 +9,7 @@
   import {
     createTimerWindow, saveSession, loadSession, quitAll,
     hideTimers, showTimers, setTimersAlwaysOnTop, muteAll, closeTimer, focusTimer,
+    createDashboardWindow,
   } from "./ipc";
   import { serializeSession, parseSession, type TimerSnapshot, type TimerState } from "./session";
   import { formatClockTime } from "./format";
@@ -83,6 +84,9 @@
   function onUnmuteAll() { muteAll(false); }
   function onPinAll() { setTimersAlwaysOnTop(true); }
   function onUnpinAll() { setTimersAlwaysOnTop(false); }
+  function onOpenDashboard() {
+    createDashboardWindow().catch((err) => console.error("createDashboardWindow error:", err));
+  }
 
   function onFocusTimer(id: number) {
     focusTimer(id).then((found) => { if (!found) remove(id); });
@@ -126,6 +130,7 @@
   <header>
     <h1>Timers</h1>
     <button class="new-btn" onclick={newTimer} title="Создать таймер">+ New</button>
+    <button class="new-btn" onclick={onOpenDashboard} title="Календарь">📅</button>
   </header>
 
   <div class="toolbar">

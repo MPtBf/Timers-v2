@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "enables the default permissions",
-  "windows": ["hub", "timer-*", "task-*", "finish-*"],
+  "windows": ["hub", "timer-*", "dashboard"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
