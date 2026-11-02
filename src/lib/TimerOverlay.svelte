@@ -8,17 +8,13 @@
   } from "../constants";
   import {
     setClickThrough, setOpacity, getModifierState, getCursorPos,
-    applyDwm, getTimerInit, raiseWindow, createTaskPanel, createFinishPanel,
+    applyDwm, getTimerInit, raiseWindow,
   } from "./ipc";
   import { HUB_LABEL, timerIdFromLabel } from "./windows";
   import {
     EVT_TIMER_SNAPSHOT, EVT_MUTE_ALL, EVT_PIN_ALL,
-    EVT_TASK_START, EVT_TASK_FINISH, EVT_TASK_CONFIG, EVT_REQUEST_FINISH,
   } from "./events";
   import type { TimerSnapshot, TimerStateReport } from "./session";
-  import type { TimerControl, LogState, RequestFinishCommand } from "./timer-control";
-  import { createTimerControl } from "./timer-control";
-  import type { StartCommand, FinishCommand, ConfigCommand } from "./timer-control";
 
   const win = getCurrentWindow();
   const id = timerIdFromLabel(win.label);
@@ -30,14 +26,7 @@
   let overtimeActive = $state(false);
   let initial = $state<TimerStateReport | null>(null);
   let timerReport = $state<TimerStateReport | null>(null);
-  let logState = $state<LogState | null>(null);
-  let ctrl = $state<TimerControl>(createTimerControl());
 
-  let minutesNow = $derived(
-    timerReport !== null && timerReport.durationMs > 0
-      ? Number((timerReport.durationMs / 60000).toFixed(1))
-      : null
-  );
   function reportSnapshot() {
     if (timerReport === null || id === null) return;
     const report = timerReport;
@@ -53,7 +42,6 @@
         y: Math.round(p.y),
         w: WINDOW_WIDTH,
         h: WINDOW_HEIGHT,
-        activityId: report.activityId ?? null,
       };
       emitTo(HUB_LABEL, EVT_TIMER_SNAPSHOT, snapshot);
     }).catch((err) => {
@@ -77,50 +65,45 @@
     if (expired) {
       win.setAlwaysOnTop(true);
       interactive = true;
-      setOpacity(1.0);
-      setClickThrough(false);
+      applyWindowInteraction(1.0, false).catch(() => {});
       raiseWindow();
     } else {
       win.setAlwaysOnTop(pinned);
     }
   }
 
-  function openTaskPanel() {
-    createTaskPanel(timerLabel, logState?.logEnabled ?? null, logState?.autoPause ?? null, minutesNow)
-      .catch((err) => console.error("createTaskPanel error:", err));
-  }
+  let lastOpacity: number | null = null;
+  let lastClickThrough: boolean | null = null;
 
-  function openFinishPanel(activityId: number | null, activityName: string | null) {
-    if (activityId === null) return;
-    createFinishPanel(timerLabel, activityId, activityName)
-      .catch((err) => console.error("createFinishPanel error:", err));
-  }
-
-  function onLogState(s: LogState) {
-    logState = s;
+  async function applyWindowInteraction(opacity: number, clickThrough: boolean) {
+    if (opacity === lastOpacity && clickThrough === lastClickThrough) return;
+    lastOpacity = opacity;
+    lastClickThrough = clickThrough;
+    await setOpacity(opacity);
+    await setClickThrough(clickThrough);
   }
 
   async function applyInteraction(ctrl: boolean, shift: boolean, over: boolean) {
     if (overtimeActive) {
       interactive = true;
-      await setOpacity(1.0);
-      await setClickThrough(false);
+      await applyWindowInteraction(1.0, false);
     } else if (shift && over) {
       interactive = false;
-      await setOpacity(0.0);
-      await setClickThrough(true);
+      await applyWindowInteraction(0.0, true);
     } else if (ctrl && over) {
       interactive = true;
-      await setOpacity(1.0);
-      await setClickThrough(false);
+      await applyWindowInteraction(1.0, false);
     } else {
       interactive = false;
-      await setOpacity(0.5);
-      await setClickThrough(true);
+      await applyWindowInteraction(0.5, true);
     }
   }
 
+  let pollBusy = false;
+
   async function pollInteraction() {
+    if (pollBusy) return;
+    pollBusy = true;
     try {
       const [ctrl, shift] = await getModifierState();
       const [cx, cy] = await getCursorPos();
@@ -133,11 +116,15 @@
       await applyInteraction(ctrl, shift, over);
     } catch (e) {
       console.error("pollInteraction error:", e);
+    } finally {
+      pollBusy = false;
     }
   }
 
   $effect(() => {
     win.setSize(new LogicalSize(WINDOW_WIDTH, WINDOW_HEIGHT));
+    lastOpacity = 0.5;
+    lastClickThrough = true;
     setClickThrough(true);
     setOpacity(0.5);
     applyDwm();
@@ -149,7 +136,6 @@
           durationMs: snap.durationMs,
           remainingMs: snap.remainingMs,
           state: snap.state,
-          activityId: snap.activityId ?? null,
         };
       }
     });
@@ -169,22 +155,6 @@
         win.setAlwaysOnTop(true);
       }
       reportSnapshot();
-    }));
-    unlistens.push(listen<StartCommand>(EVT_TASK_START, (e) => {
-      if (e.payload.timerLabel !== win.label) return;
-      ctrl.start = e.payload;
-    }));
-    unlistens.push(listen<FinishCommand>(EVT_TASK_FINISH, (e) => {
-      if (e.payload.timerLabel !== win.label) return;
-      ctrl.finish = e.payload;
-    }));
-    unlistens.push(listen<ConfigCommand>(EVT_TASK_CONFIG, (e) => {
-      if (e.payload.timerLabel !== win.label) return;
-      ctrl.config = e.payload;
-    }));
-    unlistens.push(listen<RequestFinishCommand>(EVT_REQUEST_FINISH, (e) => {
-      if (e.payload.timerLabel !== win.label) return;
-      openFinishPanel(e.payload.activityId, e.payload.activityName);
     }));
     return () => {
       for (const p of unlistens) p.then((fn) => fn());
@@ -220,10 +190,8 @@
           {soundOn}
           {initial}
           {timerLabel}
-          {ctrl}
           onOvertimeChange={handleOvertimeChange}
           onStateReport={(r) => { timerReport = r; }}
-          onLogState={onLogState}
         />
       </div>
       <div class="right-col">
@@ -244,12 +212,6 @@
           title="Always on top"
           onclick={togglePin}
         >📌</button>
-        <button
-          class="side-btn"
-          class:active={logState?.activityId != null}
-          title="Дело"
-          onclick={openTaskPanel}
-        >✎</button>
         <div
           class="drag-strip"
           role="button"

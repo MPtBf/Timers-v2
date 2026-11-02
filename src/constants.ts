@@ -36,18 +36,20 @@ export const SIDE_BTN_FONT_SIZE = 9;
 
 export const DRAG_STRIP_WIDTH = 18;
 
-export const PANEL_DRAG_STRIP_HEIGHT = 14;
-export const PANEL_STRIP_BG = "#333333";
-export const PANEL_STRIP_HOVER = "#444444";
-
-export const TASK_PANEL_WIDTH = 280;
-export const TASK_PANEL_HEIGHT = 219;
-export const FINISH_PANEL_WIDTH = 280;
-export const FINISH_PANEL_HEIGHT = 204;
-
 export const AUTO_PAUSE_IDLE_MS = 120000;
 
+export const ACTIVITY_DEBOUNCE_MS = 10000;
+
 export const TASK_NAME_COLOR = TEXT_DIM;
+
+export const DASHBOARD = {
+  hourRows: 18,
+  dayStartHour: 6,
+  blockSaturation: 80,
+  blockLightness: 50,
+  todayHeaderBg: "#1f3d2a",
+  timeLabelWidth: 28,
+};
 
 export const TIMER = {
   tickIntervalMs: 33,

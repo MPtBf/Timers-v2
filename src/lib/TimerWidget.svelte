@@ -1,55 +1,54 @@
 <script lang="ts">
+  import { emit, listen } from "@tauri-apps/api/event";
   import {
     COLOR_STOPPED, COLOR_RUNNING, COLOR_PAUSED, OVERTIME_COLOR,
     RING_BG, RING_FG, CTRL_BTN_SPACING, TIMER, SESSION, AUTO_PAUSE_IDLE_MS,
+    ACTIVITY_DEBOUNCE_MS, TASK_NAME_COLOR,
   } from "../constants";
   import { TimerModel, type TimerState } from "./timer.svelte";
   import { formatClockTime } from "./format";
-  import { getIdleTime, beepSystem, flashWindow, activityGetOpenBlock } from "./ipc";
+  import { getIdleTime, beepSystem, flashWindow } from "./ipc";
   import type { TimerStateReport } from "./session";
   import { ActivityLogger, type LogOp } from "./activity-logger";
   import { executeOps, ipcLogRunner } from "./logger-runner";
   import { shouldAutoPause } from "./idle-pause";
-  import type {
-    TimerControl, LogState, StartCommand, FinishCommand, ConfigCommand,
-  } from "./timer-control";
-  import { createTimerControl } from "./timer-control";
+  import { activityDebounce, isValidBlockName } from "./activity";
+  import { EVT_ACTIVITY_OWNER } from "./events";
 
-  let { soundOn = true, onOvertimeChange, initial = null, onStateReport, timerLabel, ctrl = createTimerControl(), onLogState }: {
+  let { soundOn = true, onOvertimeChange, initial = null, onStateReport, timerLabel }: {
     soundOn?: boolean;
     onOvertimeChange?: (expired: boolean) => void;
     initial?: TimerStateReport | null;
     onStateReport?: (report: TimerStateReport) => void;
     timerLabel: string;
-    ctrl?: TimerControl;
-    onLogState?: (state: LogState) => void;
   } = $props();
 
-  let state: TimerState = $state("stopped");
-  let remainingMs: number = $state(0);
-  let durationMs: number = $state(0);
-  let inputMinutes: number = $state(5);
-  let autoPause: boolean = $state(true);
+  let timerState: TimerState = $state<TimerState>("stopped");
+  let remainingMs: number = $state<number>(0);
+  let durationMs: number = $state<number>(0);
+  let inputMinutes: number = $state<number>(5);
+  let name: string = $state<string>("");
+  let nameLocked: boolean = $state<boolean>(false);
 
   let timer = $state(new TimerModel());
-  // svelte-ignore state_referenced_locally
-  let logger = new ActivityLogger(timerLabel);
-  let lastActivityName: string | null = null;
-  let isFinished = $state(false);
-  let beepInterval: ReturnType<typeof setInterval> | null = $state(null);
-  let flashInterval: ReturnType<typeof setInterval> | null = $state(null);
-  let lastReport: number = $state(0);
+  let logger = new ActivityLogger();
+  let isFinished = $state<boolean>(false);
+  let afkPaused = $state<boolean>(false);
+  let beepInterval: ReturnType<typeof setInterval> | null = $state<ReturnType<typeof setInterval> | null>(null);
+  let flashInterval: ReturnType<typeof setInterval> | null = $state<ReturnType<typeof setInterval> | null>(null);
+  let lastReport: number = $state<number>(0);
+  let nameDebouncer = $state(activityDebounce(() => applyNameDebounce(), ACTIVITY_DEBOUNCE_MS));
 
   let progress = $derived(durationMs > 0 ? 1 - remainingMs / durationMs : 0);
   let timeColor = $derived(
     isFinished ? OVERTIME_COLOR
-      : state === "running" ? COLOR_RUNNING
-        : state === "paused" ? COLOR_PAUSED
+      : timerState === "running" ? COLOR_RUNNING
+        : timerState === "paused" ? COLOR_PAUSED
           : COLOR_STOPPED
   );
   let ringProgressColor = $derived(
     isFinished ? OVERTIME_COLOR
-      : state === "paused" ? COLOR_PAUSED
+      : timerState === "paused" ? COLOR_PAUSED
         : RING_FG
   );
   let ringProgress = $derived(isFinished ? 1.0 : progress);
@@ -57,16 +56,16 @@
   let displayTime = $derived(
     isFinished
       ? formatClockTime(-remainingMs)
-      : state === "stopped"
+      : timerState === "stopped"
         ? formatClockTime(durationMs > 0 ? durationMs : inputMinutes * 60000)
         : formatClockTime(remainingMs)
   );
 
-  let btnStartVisible = $derived(!isFinished && state === "stopped");
-  let btnPauseVisible = $derived(!isFinished && state === "running");
-  let btnResumeVisible = $derived(!isFinished && state === "paused");
-  let btnStopVisible = $derived(state === "running" || state === "paused" || isFinished);
-  let btnRestartVisible = $derived(state === "running" || state === "paused" || isFinished);
+  let btnStartVisible = $derived(!isFinished && timerState === "stopped");
+  let btnPauseVisible = $derived(!isFinished && timerState === "running");
+  let btnResumeVisible = $derived(!isFinished && timerState === "paused");
+  let btnStopVisible = $derived(timerState === "running" || timerState === "paused" || isFinished);
+  let btnRestartVisible = $derived(timerState === "running" || timerState === "paused" || isFinished);
 
   function runOps(ops: LogOp[]) {
     executeOps(ops, ipcLogRunner).catch((err) => {
@@ -79,15 +78,13 @@
     onStateReport?.({
       durationMs: Math.round(timer.durationMs),
       remainingMs: Math.round(remainingMs),
-      state,
-      activityId: logger.activityId ?? null,
+      state: timerState,
     });
-    onLogState?.({
-      logEnabled: logger.logEnabled,
-      autoPause,
-      activityId: logger.activityId ?? null,
-      activityName: lastActivityName,
-    });
+  }
+
+  function broadcastOwner(activeName: string | null) {
+    emit(EVT_ACTIVITY_OWNER, { timerLabel, name: activeName })
+      .catch((err) => console.error("activity-owner emit error:", err));
   }
 
   function stopOvertime() {
@@ -95,11 +92,13 @@
     if (flashInterval !== null) { clearInterval(flashInterval); flashInterval = null; }
   }
 
+  let beepBusy = false;
   function maybeBeep() {
-    if (!soundOn) return;
+    if (!soundOn || beepBusy) return;
+    beepBusy = true;
     getIdleTime().then((idleMs) => {
       if (idleMs < TIMER.afkMuteMs) beepSystem();
-    });
+    }).catch(() => {}).finally(() => { beepBusy = false; });
   }
 
   function startOvertime() {
@@ -113,15 +112,23 @@
     reportNow();
   }
 
+  function beginBlock(activeName: string, startMs: number) {
+    const ops = logger.begin(activeName, startMs);
+    if (ops.length) runOps(ops);
+  }
+
+  function closeBlock(endMs: number) {
+    const ops = logger.stop(endMs);
+    if (ops.length) runOps(ops);
+  }
+
   function onStart() {
     if (inputMinutes <= 0) return;
     isFinished = false;
+    afkPaused = false;
     stopOvertime();
     onOvertimeChange?.(false);
-    logger.setLogEnabled(false);
-    const ops = logger.begin(null, Date.now());
-    if (ops.length) runOps(ops);
-    lastActivityName = null;
+    beginBlock(name, Date.now());
     timer.setDuration(inputMinutes);
     timer.start();
     reportNow();
@@ -129,72 +136,65 @@
 
   function onPause() {
     timer.pause();
-    const ops = logger.pause(Date.now());
-    if (ops.length) runOps(ops);
+    closeBlock(Date.now());
+    broadcastOwner(null);
     reportNow();
   }
 
   function onResume() {
     timer.resume();
-    const ops = logger.resume(Date.now());
-    if (ops.length) runOps(ops);
+    if (isValidBlockName(name)) {
+      beginBlock(name, Date.now());
+      broadcastOwner(name.trim());
+    }
     reportNow();
   }
 
   function onStop() {
     isFinished = false;
+    afkPaused = false;
     stopOvertime();
     onOvertimeChange?.(false);
     timer.stop();
-    const ops = logger.stop(Date.now());
-    if (ops.length) runOps(ops);
+    closeBlock(Date.now());
+    broadcastOwner(null);
     reportNow();
   }
 
   function onIdlePause() {
     timer.pause();
-    const ops = logger.pause(Date.now(), "away");
-    if (ops.length) runOps(ops);
+    closeBlock(Date.now());
+    broadcastOwner(null);
+    afkPaused = true;
     reportNow();
   }
 
-  function startExternal(cmd: StartCommand) {
-    if (cmd.minutes <= 0) return;
-    isFinished = false;
-    stopOvertime();
-    onOvertimeChange?.(false);
-    logger.setLogEnabled(cmd.logEnabled);
-    autoPause = cmd.autoPause;
-    inputMinutes = cmd.minutes;
-    const ops = logger.begin(cmd.activityId, Date.now());
-    if (ops.length) runOps(ops);
-    lastActivityName = cmd.activityName;
-    timer.setDuration(cmd.minutes);
-    timer.start();
-    reportNow();
-  }
-
-  function finishExternal(cmd: FinishCommand) {
-    const ops = logger.finish(cmd.efficiency, cmd.usefulness, cmd.endedMs);
-    if (ops.length) runOps(ops);
-    lastActivityName = null;
-    isFinished = false;
-    stopOvertime();
-    onOvertimeChange?.(false);
-    timer.stop();
-    reportNow();
-  }
-
-  function applyConfig(cmd: ConfigCommand) {
-    autoPause = cmd.autoPause;
-    if (cmd.logEnabled !== logger.logEnabled) {
-      if (!cmd.logEnabled && logger.hasOpenBlock) {
-        const ops = logger.stop(Date.now());
-        if (ops.length) runOps(ops);
-      }
-      logger.setLogEnabled(cmd.logEnabled);
+  function onIdleReturn() {
+    afkPaused = false;
+    timer.resume();
+    if (isValidBlockName(name)) {
+      beginBlock(name, Date.now());
+      broadcastOwner(name.trim());
     }
     reportNow();
+  }
+
+  function applyNameDebounce() {
+    if (!isValidBlockName(name)) return;
+    const ops = logger.switchTo(name, Date.now());
+    if (ops.length) runOps(ops);
+    broadcastOwner(name.trim());
+  }
+
+  function onNameInput() {
+    if (timerState === "stopped" || isFinished) return;
+    if (name.trim() === "") {
+      nameDebouncer.cancel();
+      closeBlock(Date.now());
+      broadcastOwner(null);
+      return;
+    }
+    nameDebouncer.push();
   }
 
   function onRestart() { onStop(); onStart(); }
@@ -205,7 +205,7 @@
     if (performance.now() - lastReport >= SESSION.snapshotIntervalMs) reportNow();
   }
 
-  function onStateChange(s: TimerState) { state = s; }
+  function onStateChange(s: TimerState) { timerState = s; }
   function onFinished() { startOvertime(); }
 
   timer.on({ onTick, onStateChange, onFinished });
@@ -222,72 +222,37 @@
     }
   });
 
-  $effect(() => {
-    let cancelled = false;
-    activityGetOpenBlock(timerLabel).then((row) => {
-      if (cancelled) return;
-      if (row && row.activityId !== null) {
-        logger.restore(row.activityId, row.kind);
-        lastActivityName = row.activityName;
-      } else if (row) {
-        logger.restore(initial?.activityId ?? null, row.kind);
-        lastActivityName = row.activityName ?? null;
-      } else if (initial?.activityId != null) {
-        logger.restore(initial.activityId, null);
-        lastActivityName = null;
-      }
-      reportNow();
-    }).catch((err) => {
-      console.error("getOpenBlock restore error:", err);
-      if (initial?.activityId != null) {
-        logger.restore(initial.activityId, null);
-        lastActivityName = null;
-        reportNow();
-      }
-    });
-    return () => { cancelled = true; };
-  });
-
+  let idleBusy = false;
   $effect(() => {
     const idp = setInterval(() => {
-      if (state !== "running" || !autoPause || isFinished) return;
+      if (isFinished || idleBusy) return;
+      idleBusy = true;
       getIdleTime().then((idleMs) => {
-        if (shouldAutoPause({ state, autoPause, idleMs, thresholdMs: AUTO_PAUSE_IDLE_MS, overtime: isFinished })) {
+        if (afkPaused) {
+          if (idleMs < AUTO_PAUSE_IDLE_MS) onIdleReturn();
+        } else if (shouldAutoPause({ state: timerState, autoPause: true, idleMs, thresholdMs: AUTO_PAUSE_IDLE_MS, overtime: isFinished })) {
           onIdlePause();
         }
-      }).catch(() => {});
+      }).catch(() => {}).finally(() => { idleBusy = false; });
     }, 1000);
     return () => clearInterval(idp);
   });
 
   $effect(() => {
-    const startCmd = ctrl.start;
-    if (startCmd) {
-      ctrl.start = null;
-      startExternal(startCmd);
-    }
-  });
-
-  $effect(() => {
-    const finishCmd = ctrl.finish;
-    if (finishCmd) {
-      ctrl.finish = null;
-      finishExternal(finishCmd);
-    }
-  });
-
-  $effect(() => {
-    const configCmd = ctrl.config;
-    if (configCmd) {
-      ctrl.config = null;
-      applyConfig(configCmd);
-    }
+    const unlistens: Array<Promise<() => void>> = [];
+    unlistens.push(listen<{ timerLabel: string; name: string | null }>(EVT_ACTIVITY_OWNER, (e) => {
+      if (e.payload.timerLabel === timerLabel) return;
+      nameLocked = e.payload.name !== null;
+    }));
+    return () => {
+      for (const p of unlistens) p.then((fn) => fn());
+    };
   });
 
   $effect(() => {
     const handler = () => {
-      const ops = logger.stop(Date.now());
-      if (ops.length) runOps(ops);
+      closeBlock(Date.now());
+      broadcastOwner(null);
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
@@ -296,14 +261,27 @@
   $effect(() => {
     return () => {
       stopOvertime();
+      nameDebouncer.cancel();
       timer.destroy();
-      const ops = logger.stop(Date.now());
-      if (ops.length) runOps(ops);
+      closeBlock(Date.now());
+      broadcastOwner(null);
     };
   });
 </script>
 
 <div class="timer-widget">
+  <div class="name-row">
+    <input
+      type="text"
+      placeholder="Название дела"
+      bind:value={name}
+      oninput={onNameInput}
+      disabled={nameLocked}
+      class="namebox"
+      style="color: {TASK_NAME_COLOR};"
+    />
+  </div>
+
   <div class="spin-row">
     <input
       type="number"
@@ -347,6 +325,28 @@
     width: 100%;
     height: 100%;
   }
+  .name-row {
+    width: 100%;
+    flex-shrink: 0;
+    line-height: 0;
+  }
+  .namebox {
+    width: 100%;
+    height: 18px;
+    padding: 0 4px;
+    margin: 0;
+    font-size: 10px;
+    text-align: center;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    border: 1px solid #444;
+    border-top: none;
+    border-radius: 0;
+    outline: none;
+    box-sizing: border-box;
+    font-family: "Segoe UI", sans-serif;
+  }
+  .namebox:disabled { opacity: 0.4; }
   .spin-row {
     width: 100%;
     flex-shrink: 0;
