@@ -1,85 +1,436 @@
+use std::fmt;
+
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 pub const ACTIVITY_DB_FILE: &str = "activity.db";
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const KIND_WORK: &str = "work";
-const KIND_BREAK: &str = "break";
-const KIND_AWAY: &str = "away";
 
-const STATUS_ACTIVE: &str = "active";
-const STATUS_FINISHED: &str = "finished";
-
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Activity {
-    pub id: Option<i64>,
-    pub name: String,
-    pub category: String,
-    pub tags: Vec<String>,
-    pub parent_id: Option<i64>,
-    pub log_enabled: bool,
-    pub status: String,
-    pub efficiency: Option<i64>,
-    pub usefulness: Option<i64>,
-    pub started_ms: i64,
-    pub ended_ms: Option<i64>,
-}
-
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Block {
-    pub id: Option<i64>,
-    pub activity_id: Option<i64>,
-    pub kind: String,
-    pub start_ms: i64,
-    pub end_ms: Option<i64>,
-    pub timer_label: String,
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivityBlockRow {
-    pub id: i64,
-    pub activity_id: Option<i64>,
-    pub kind: String,
-    pub start_ms: i64,
-    pub end_ms: Option<i64>,
-    pub timer_label: String,
-    pub activity_name: Option<String>,
-    pub activity_category: Option<String>,
-    pub tags: Option<Vec<String>>,
-    pub status: Option<String>,
-    pub efficiency: Option<i64>,
-    pub usefulness: Option<i64>,
-    pub log_enabled: Option<bool>,
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivitySummary {
     pub id: i64,
     pub name: String,
-    pub category: String,
-    pub status: String,
+    pub start_ms: i64,
+    pub end_ms: Option<i64>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Suggestions {
-    pub categories: Vec<String>,
-    pub activities: Vec<ActivitySummary>,
+#[derive(Debug)]
+pub enum BlockError {
+    Database(rusqlite::Error),
+    InvalidName,
+    InvalidEnd { start_ms: i64, end_ms: i64 },
+    InvalidQueryRange { from_ms: i64, to_ms: i64 },
+    AlreadyOpen { existing_id: i64 },
+    Overlap { existing_id: i64 },
+    NotFound { id: i64 },
+    Migration(String),
+    UnsupportedSchema { version: i64 },
 }
 
-pub fn init(conn: &Connection) -> Result<(), String> {
-    let version: i64 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|e| e.to_string())?;
-    if version < SCHEMA_VERSION {
+impl fmt::Display for BlockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BlockError::Database(e) => write!(f, "database_error: {e}"),
+            BlockError::InvalidName => write!(f, "invalid_name"),
+            BlockError::InvalidEnd { start_ms, end_ms } => {
+                write!(f, "invalid_end: end_ms {end_ms} before start_ms {start_ms}")
+            }
+            BlockError::InvalidQueryRange { from_ms, to_ms } => {
+                write!(f, "invalid_query_range: from {from_ms} > to {to_ms}")
+            }
+            BlockError::AlreadyOpen { existing_id } => write!(f, "already_open: block {existing_id}"),
+            BlockError::Overlap { existing_id } => write!(f, "overlap: block {existing_id}"),
+            BlockError::NotFound { id } => write!(f, "block_not_found: {id}"),
+            BlockError::Migration(msg) => write!(f, "migration_error: {msg}"),
+            BlockError::UnsupportedSchema { version } => write!(f, "unsupported_schema: {version}"),
+        }
+    }
+}
+
+impl std::error::Error for BlockError {}
+
+const CREATE_BLOCKS_TABLE: &str = "CREATE TABLE blocks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  start_ms INTEGER NOT NULL,
+  end_ms INTEGER NULL,
+  CHECK (end_ms IS NULL OR end_ms >= start_ms)
+)";
+
+const CREATE_START_INDEX: &str = "CREATE INDEX idx_blocks_start ON blocks(start_ms)";
+
+const CREATE_ONE_OPEN_INDEX: &str =
+    "CREATE UNIQUE INDEX idx_blocks_one_open ON blocks((1)) WHERE end_ms IS NULL";
+
+fn create_schema(conn: &Connection) -> Result<(), BlockError> {
+    conn.execute_batch(CREATE_BLOCKS_TABLE)
+        .map_err(BlockError::Database)?;
+    create_indexes(conn)
+}
+
+fn create_indexes(conn: &Connection) -> Result<(), BlockError> {
+    conn.execute_batch(CREATE_START_INDEX)
+        .map_err(BlockError::Database)?;
+    conn.execute_batch(CREATE_ONE_OPEN_INDEX)
+        .map_err(BlockError::Database)?;
+    Ok(())
+}
+
+/// Returns the current `PRAGMA user_version`, or 0 when unreadable.
+fn user_version(conn: &Connection) -> Result<i64, BlockError> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(BlockError::Database)
+}
+
+fn set_user_version(conn: &Connection, version: i64) -> Result<(), BlockError> {
+    conn.pragma_update(None, "user_version", version)
+        .map_err(BlockError::Database)
+}
+
+pub fn init(conn: &mut Connection) -> Result<(), BlockError> {
+    let version = user_version(conn)?;
+    match version {
+        0 => {
+            create_schema(conn)?;
+            set_user_version(conn, SCHEMA_VERSION)?;
+            Ok(())
+        }
+        v if v == SCHEMA_VERSION => {
+            validate_schema(conn)?;
+            Ok(())
+        }
+        1 => migrate_v1(conn),
+        other => Err(BlockError::UnsupportedSchema { version: other }),
+    }
+}
+
+fn validate_schema(conn: &Connection) -> Result<(), BlockError> {
+    let has_table: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='blocks'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(BlockError::Database)?;
+    if has_table != 1 {
+        return Err(BlockError::Migration(
+            "blocks table missing in v2 schema".to_string(),
+        ));
+    }
+    let has_index: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_blocks_start'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(BlockError::Database)?;
+    if has_index != 1 {
+        return Err(BlockError::Migration(
+            "idx_blocks_start missing in v2 schema".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Migrates a legacy (version 1) `activities` + `blocks` schema to the v2 blocks-only schema.
+///
+/// Only closed `work` blocks with a non-blank resolved activity name are copied. Break/away
+/// rows, open rows, orphaned rows, and blank-name rows are dropped. Rows whose `end_ms <
+/// start_ms` violate the new CHECK constraint and abort the migration (the transaction rolls
+/// back, leaving the legacy schema intact).
+fn migrate_v1(conn: &mut Connection) -> Result<(), BlockError> {
+    let tx = conn.transaction().map_err(BlockError::Database)?;
+
+    tx.execute_batch(
+        "CREATE TABLE blocks_new (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+           start_ms INTEGER NOT NULL,
+           end_ms INTEGER NULL,
+           CHECK (end_ms IS NULL OR end_ms >= start_ms)
+         )",
+    )
+    .map_err(|e| BlockError::Migration(e.to_string()))?;
+
+    tx.execute(
+        "INSERT INTO blocks_new (id, name, start_ms, end_ms)
+         SELECT b.id, trim(a.name), b.start_ms, b.end_ms
+         FROM blocks b
+         JOIN activities a ON a.id = b.activity_id
+         WHERE b.kind = ?1
+           AND b.end_ms IS NOT NULL
+           AND trim(a.name) <> ''",
+        params![KIND_WORK],
+    )
+    .map_err(|e| BlockError::Migration(e.to_string()))?;
+
+    tx.execute_batch("DROP TABLE blocks")
+        .map_err(|e| BlockError::Migration(e.to_string()))?;
+    tx.execute_batch("DROP TABLE activities")
+        .map_err(|e| BlockError::Migration(e.to_string()))?;
+    tx.execute_batch("ALTER TABLE blocks_new RENAME TO blocks")
+        .map_err(|e| BlockError::Migration(e.to_string()))?;
+
+    tx.execute_batch(CREATE_START_INDEX)
+        .map_err(|e| BlockError::Migration(e.to_string()))?;
+    tx.execute_batch(CREATE_ONE_OPEN_INDEX)
+        .map_err(|e| BlockError::Migration(e.to_string()))?;
+
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(|e| BlockError::Migration(e.to_string()))?;
+    tx.commit().map_err(BlockError::Database)?;
+    Ok(())
+}
+
+fn is_open(conn: &Connection) -> Result<Option<i64>, BlockError> {
+    conn.query_row("SELECT id FROM blocks WHERE end_ms IS NULL", [], |row| {
+        row.get(0)
+    })
+    .optional()
+    .map_err(BlockError::Database)
+}
+
+pub fn open_block(
+    conn: &mut Connection,
+    name: &str,
+    start_ms: i64,
+    end_ms: Option<i64>,
+) -> Result<i64, BlockError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(BlockError::InvalidName);
+    }
+    if let Some(end) = end_ms {
+        if end < start_ms {
+            return Err(BlockError::InvalidEnd { start_ms, end_ms: end });
+        }
+        if let Some(existing_id) = overlapping_block(conn, start_ms, end, None)? {
+            return Err(BlockError::Overlap { existing_id });
+        }
+    }
+    if end_ms.is_none() {
+        if let Some(existing_id) = is_open(conn)? {
+            return Err(BlockError::AlreadyOpen { existing_id });
+        }
+    }
+    conn.execute(
+        "INSERT INTO blocks (name, start_ms, end_ms) VALUES (?1, ?2, ?3)",
+        params![name, start_ms, end_ms],
+    )
+    .map_err(|e| {
+        // A pre-check race is closed by the unique one-open index.
+        if is_constraint_violation(&e) {
+            BlockError::AlreadyOpen { existing_id: 0 }
+        } else {
+            BlockError::Database(e)
+        }
+    })?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn overlapping_block(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    exclude_id: Option<i64>,
+) -> Result<Option<i64>, BlockError> {
+    let sql = match exclude_id {
+        Some(_) => {
+            "SELECT id FROM blocks
+             WHERE id != ?4
+               AND start_ms < ?2
+               AND end_ms IS NOT NULL
+               AND end_ms > ?3
+               AND ?1 < end_ms"
+        }
+        None => {
+            "SELECT id FROM blocks
+             WHERE start_ms < ?2
+               AND end_ms IS NOT NULL
+               AND end_ms > ?3
+               AND ?1 < end_ms"
+        }
+    };
+    let mut stmt = conn.prepare(sql).map_err(BlockError::Database)?;
+    let row = match exclude_id {
+        Some(id) => stmt
+            .query_row(params![start_ms, end_ms, start_ms, id], |row| row.get(0))
+            .optional(),
+        None => stmt
+            .query_row(params![start_ms, end_ms, start_ms], |row| row.get(0))
+            .optional(),
+    }
+    .map_err(BlockError::Database)?;
+    Ok(row)
+}
+
+pub fn close_block(conn: &mut Connection, end_ms: i64) -> Result<Option<i64>, BlockError> {
+    let Some((id, start_ms)) = conn
+        .query_row(
+            "SELECT id, start_ms FROM blocks WHERE end_ms IS NULL",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(BlockError::Database)?
+    else {
+        return Ok(None);
+    };
+    if end_ms < start_ms {
+        return Err(BlockError::InvalidEnd { start_ms, end_ms });
+    }
+    conn.execute(
+        "UPDATE blocks SET end_ms=?1 WHERE id=?2",
+        params![end_ms, id],
+    )
+    .map_err(BlockError::Database)?;
+    Ok(Some(id))
+}
+
+pub fn delete_block(conn: &mut Connection, id: i64) -> Result<(), BlockError> {
+    let n = conn
+        .execute("DELETE FROM blocks WHERE id=?1", params![id])
+        .map_err(BlockError::Database)?;
+    if n == 0 {
+        return Err(BlockError::NotFound { id });
+    }
+    Ok(())
+}
+
+pub fn update_block(
+    conn: &mut Connection,
+    id: i64,
+    name: &str,
+    start_ms: i64,
+    end_ms: Option<i64>,
+) -> Result<(), BlockError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(BlockError::InvalidName);
+    }
+    if let Some(end) = end_ms {
+        if end < start_ms {
+            return Err(BlockError::InvalidEnd { start_ms, end_ms: end });
+        }
+    }
+
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM blocks WHERE id=?1)",
+            params![id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(BlockError::Database)?
+        != 0;
+    if !exists {
+        return Err(BlockError::NotFound { id });
+    }
+
+    if end_ms.is_none() {
+        let other_open: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM blocks WHERE end_ms IS NULL AND id != ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(BlockError::Database)?;
+        if let Some(existing_id) = other_open {
+            return Err(BlockError::AlreadyOpen { existing_id });
+        }
+    } else {
+        let end = end_ms.unwrap();
+        let overlap: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM blocks
+                 WHERE id != ?1
+                   AND start_ms < ?2
+                   AND end_ms IS NOT NULL
+                   AND end_ms > ?3
+                   AND ?3 < end_ms",
+                params![id, end, start_ms],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(BlockError::Database)?;
+        if let Some(existing_id) = overlap {
+            return Err(BlockError::Overlap { existing_id });
+        }
+    }
+
+    conn.execute(
+        "UPDATE blocks SET name=?1, start_ms=?2, end_ms=?3 WHERE id=?4",
+        params![name, start_ms, end_ms, id],
+    )
+    .map_err(BlockError::Database)?;
+    Ok(())
+}
+
+pub fn query_blocks(conn: &Connection, from_ms: i64, to_ms: i64) -> Result<Vec<Block>, BlockError> {
+    if from_ms > to_ms {
+        return Err(BlockError::InvalidQueryRange { from_ms, to_ms });
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, start_ms, end_ms FROM blocks
+             WHERE start_ms < ?2 AND (end_ms IS NULL OR end_ms > ?1)
+             ORDER BY start_ms, id",
+        )
+        .map_err(BlockError::Database)?;
+    let rows = stmt
+        .query_map(params![from_ms, to_ms], |row| {
+            Ok(Block {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                start_ms: row.get(2)?,
+                end_ms: row.get(3)?,
+            })
+        })
+        .map_err(BlockError::Database)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(BlockError::Database)
+}
+
+pub fn suggestions(conn: &Connection) -> Result<Vec<String>, BlockError> {
+    let mut stmt = conn
+        .prepare("SELECT name FROM blocks GROUP BY name ORDER BY MAX(start_ms) DESC, name")
+        .map_err(BlockError::Database)?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(BlockError::Database)?;
+    names.collect::<Result<Vec<_>, _>>().map_err(BlockError::Database)
+}
+
+pub fn reconcile(conn: &mut Connection) -> Result<usize, BlockError> {
+    conn.execute("DELETE FROM blocks WHERE end_ms IS NULL", [])
+        .map_err(BlockError::Database)
+}
+
+fn is_constraint_violation(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.code == rusqlite::ErrorCode::ConstraintViolation
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init(&mut conn).unwrap();
+        conn
+    }
+
+    fn legacy_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS activities (
+            "CREATE TABLE activities (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                name TEXT NOT NULL,
                category TEXT NOT NULL,
@@ -92,7 +443,7 @@ pub fn init(conn: &Connection) -> Result<(), String> {
                started_ms INTEGER NOT NULL,
                ended_ms INTEGER NULL
              );
-             CREATE TABLE IF NOT EXISTS blocks (
+             CREATE TABLE blocks (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                activity_id INTEGER NULL,
                kind TEXT NOT NULL,
@@ -100,853 +451,467 @@ pub fn init(conn: &Connection) -> Result<(), String> {
                end_ms INTEGER NULL,
                timer_label TEXT NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS idx_blocks_start ON blocks(start_ms);",
+             PRAGMA user_version = 1;",
         )
-        .map_err(|e| e.to_string())?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-pub fn upsert_activity(conn: &mut Connection, activity: &Activity) -> Result<i64, String> {
-    validate_activity(activity)?;
-    let tags_json = serde_json::to_string(&activity.tags).map_err(|e| e.to_string())?;
-    match activity.id {
-        Some(id) => {
-            let n = conn
-                .execute(
-                    "UPDATE activities SET name=?1, category=?2, tags=?3, parent_id=?4,
-                     log_enabled=?5, status=?6, efficiency=?7, usefulness=?8,
-                     started_ms=?9, ended_ms=?10 WHERE id=?11",
-                    params![
-                        activity.name,
-                        activity.category,
-                        tags_json,
-                        activity.parent_id,
-                        activity.log_enabled,
-                        activity.status,
-                        activity.efficiency,
-                        activity.usefulness,
-                        activity.started_ms,
-                        activity.ended_ms,
-                        id
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-            if n == 0 {
-                return Err(format!("activity {id} not found"));
-            }
-            Ok(id)
-        }
-        None => {
-            conn.execute(
-                "INSERT INTO activities
-                 (name, category, tags, parent_id, log_enabled, status, efficiency, usefulness, started_ms, ended_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    activity.name,
-                    activity.category,
-                    tags_json,
-                    activity.parent_id,
-                    activity.log_enabled,
-                    activity.status,
-                    activity.efficiency,
-                    activity.usefulness,
-                    activity.started_ms,
-                    activity.ended_ms
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(conn.last_insert_rowid())
-        }
-    }
-}
-
-pub fn open_block(conn: &mut Connection, block: &Block) -> Result<i64, String> {
-    validate_kind(&block.kind)?;
-    let activity_id = effective_activity_id(block)?;
-    let owner: Option<String> = conn
-        .query_row(
-            "SELECT timer_label FROM blocks WHERE end_ms IS NULL",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    if let Some(label) = owner {
-        return Err(format!("timer {label} already has an open block"));
-    }
-    conn.execute(
-        "INSERT INTO blocks (activity_id, kind, start_ms, end_ms, timer_label)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            activity_id,
-            block.kind,
-            block.start_ms,
-            block.end_ms,
-            block.timer_label
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(conn.last_insert_rowid())
-}
-
-pub fn close_block(conn: &mut Connection, timer_label: &str, end_ms: i64) -> Result<Option<i64>, String> {
-    let open: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT id, start_ms FROM blocks WHERE timer_label=?1 AND end_ms IS NULL",
-            params![timer_label],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    let Some((id, start_ms)) = open else {
-        return Ok(None);
-    };
-    if end_ms < start_ms {
-        return Err(format!("end_ms {end_ms} before start_ms {start_ms}"));
-    }
-    conn.execute(
-        "UPDATE blocks SET end_ms=?1 WHERE id=?2",
-        params![end_ms, id],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(Some(id))
-}
-
-pub fn finish_activity(
-    conn: &mut Connection,
-    activity_id: i64,
-    efficiency: Option<i64>,
-    usefulness: Option<i64>,
-    ended_ms: i64,
-) -> Result<(), String> {
-    validate_rating("efficiency", efficiency)?;
-    validate_rating("usefulness", usefulness)?;
-    let n = conn
-        .execute(
-            "UPDATE activities SET status=?1, efficiency=?2, usefulness=?3, ended_ms=?4 WHERE id=?5",
-            params![STATUS_FINISHED, efficiency, usefulness, ended_ms, activity_id],
-        )
-        .map_err(|e| e.to_string())?;
-    if n == 0 {
-        return Err(format!("activity {activity_id} not found"));
-    }
-    Ok(())
-}
-
-pub fn update_block(conn: &mut Connection, block: &Block) -> Result<(), String> {
-    let id = block
-        .id
-        .ok_or_else(|| "block id is required for update".to_string())?;
-    validate_kind(&block.kind)?;
-    let activity_id = effective_activity_id(block)?;
-    if let Some(end) = block.end_ms {
-        if end < block.start_ms {
-            return Err(format!("end_ms {end} before start_ms {}", block.start_ms));
-        }
-    }
-    let n = conn
-        .execute(
-            "UPDATE blocks SET activity_id=?1, kind=?2, start_ms=?3, end_ms=?4, timer_label=?5 WHERE id=?6",
-            params![
-                activity_id,
-                block.kind,
-                block.start_ms,
-                block.end_ms,
-                block.timer_label,
-                id
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-    if n == 0 {
-        return Err(format!("block {id} not found"));
-    }
-    Ok(())
-}
-
-pub fn delete_block(conn: &mut Connection, id: i64) -> Result<(), String> {
-    conn.execute("DELETE FROM blocks WHERE id=?1", params![id])
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-pub fn delete_activity(conn: &mut Connection, id: i64) -> Result<(), String> {
-    conn.execute("DELETE FROM blocks WHERE activity_id=?1", params![id])
-        .map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM activities WHERE id=?1", params![id])
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn row_to_activity_block(row: &rusqlite::Row) -> rusqlite::Result<ActivityBlockRow> {
-    let tags_json: Option<String> = row.get(8)?;
-    let tags = tags_json.map(|t| serde_json::from_str::<Vec<String>>(&t).unwrap_or_default());
-    Ok(ActivityBlockRow {
-        id: row.get(0)?,
-        activity_id: row.get(1)?,
-        kind: row.get(2)?,
-        start_ms: row.get(3)?,
-        end_ms: row.get(4)?,
-        timer_label: row.get(5)?,
-        activity_name: row.get(6)?,
-        activity_category: row.get(7)?,
-        tags,
-        status: row.get(9)?,
-        efficiency: row.get(10)?,
-        usefulness: row.get(11)?,
-        log_enabled: row.get(12)?,
-    })
-}
-
-pub fn query_blocks(conn: &Connection, from_ms: i64, to_ms: i64) -> Result<Vec<ActivityBlockRow>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT b.id, b.activity_id, b.kind, b.start_ms, b.end_ms, b.timer_label,
-                    a.name, a.category, a.tags, a.status, a.efficiency, a.usefulness, a.log_enabled
-             FROM blocks b
-             LEFT JOIN activities a ON a.id = b.activity_id
-             WHERE b.start_ms < ?2 AND (b.end_ms IS NULL OR b.end_ms > ?1)
-             ORDER BY b.start_ms, b.id",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![from_ms, to_ms], row_to_activity_block)
-        .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
-}
-
-pub fn get_open_block(conn: &Connection, timer_label: &str) -> Result<Option<ActivityBlockRow>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT b.id, b.activity_id, b.kind, b.start_ms, b.end_ms, b.timer_label,
-                    a.name, a.category, a.tags, a.status, a.efficiency, a.usefulness, a.log_enabled
-             FROM blocks b
-             LEFT JOIN activities a ON a.id = b.activity_id
-             WHERE b.timer_label = ?1 AND b.end_ms IS NULL
-             ORDER BY b.id
-             LIMIT 1",
-        )
-        .map_err(|e| e.to_string())?;
-    let mut rows = stmt
-        .query_map(params![timer_label], row_to_activity_block)
-        .map_err(|e| e.to_string())?;
-    rows.next().transpose().map_err(|e| e.to_string())
-}
-
-pub fn get_global_open_block(conn: &Connection) -> Result<Option<ActivityBlockRow>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT b.id, b.activity_id, b.kind, b.start_ms, b.end_ms, b.timer_label,
-                    a.name, a.category, a.tags, a.status, a.efficiency, a.usefulness, a.log_enabled
-             FROM blocks b
-             LEFT JOIN activities a ON a.id = b.activity_id
-             WHERE b.end_ms IS NULL
-             ORDER BY b.id
-             LIMIT 1",
-        )
-        .map_err(|e| e.to_string())?;
-    let mut rows = stmt
-        .query_map([], row_to_activity_block)
-        .map_err(|e| e.to_string())?;
-    rows.next().transpose().map_err(|e| e.to_string())
-}
-
-pub fn suggestions(conn: &Connection) -> Result<Suggestions, String> {
-    let mut cat_stmt = conn
-        .prepare("SELECT DISTINCT category FROM activities ORDER BY category")
-        .map_err(|e| e.to_string())?;
-    let categories = cat_stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-
-    let mut act_stmt = conn
-        .prepare(
-            "SELECT id, name, category, status FROM activities ORDER BY started_ms DESC LIMIT 100",
-        )
-        .map_err(|e| e.to_string())?;
-    let activities = act_stmt
-        .query_map([], |row| {
-            Ok(ActivitySummary {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                category: row.get(2)?,
-                status: row.get(3)?,
-            })
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-
-    Ok(Suggestions {
-        categories,
-        activities,
-    })
-}
-
-pub fn reconcile(conn: &mut Connection, cutoff_ms: i64) -> Result<usize, String> {
-    let n = conn
-        .execute(
-            "UPDATE blocks SET end_ms = start_ms WHERE end_ms IS NULL AND start_ms < ?1",
-            params![cutoff_ms],
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(n)
-}
-
-fn effective_activity_id(block: &Block) -> Result<Option<i64>, String> {
-    match block.kind.as_str() {
-        KIND_WORK => Ok(Some(
-            block
-                .activity_id
-                .ok_or_else(|| "work block requires activity_id".to_string())?,
-        )),
-        _ => Ok(None),
-    }
-}
-
-fn validate_activity(activity: &Activity) -> Result<(), String> {    if activity.name.trim().is_empty() {
-        return Err("activity name must not be empty".to_string());
-    }
-    if activity.category.trim().is_empty() {
-        return Err("activity category must not be empty".to_string());
-    }
-    validate_status(&activity.status)?;
-    validate_rating("efficiency", activity.efficiency)?;
-    validate_rating("usefulness", activity.usefulness)?;
-    Ok(())
-}
-
-fn validate_status(status: &str) -> Result<(), String> {
-    if status == STATUS_ACTIVE || status == STATUS_FINISHED {
-        Ok(())
-    } else {
-        Err(format!("invalid status: {status}"))
-    }
-}
-
-fn validate_kind(kind: &str) -> Result<(), String> {
-    if kind == KIND_WORK || kind == KIND_BREAK || kind == KIND_AWAY {
-        Ok(())
-    } else {
-        Err(format!("invalid block kind: {kind}"))
-    }
-}
-
-fn validate_rating(name: &str, value: Option<i64>) -> Result<(), String> {
-    match value {
-        Some(v) if !(0..=100).contains(&v) => Err(format!("{name} rating {v} out of range 0..100")),
-        _ => Ok(()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        init(&conn).unwrap();
+        .unwrap();
         conn
     }
 
-    fn activity(id: Option<i64>, name: &str, category: &str) -> Activity {
-        Activity {
-            id,
-            name: name.to_string(),
-            category: category.to_string(),
-            tags: vec![],
-            parent_id: None,
-            log_enabled: true,
-            status: STATUS_ACTIVE.to_string(),
-            efficiency: None,
-            usefulness: None,
-            started_ms: 1_000,
-            ended_ms: None,
-        }
-    }
-
-    fn work_block(timer_label: &str, activity_id: Option<i64>, start: i64, end: Option<i64>) -> Block {
-        Block {
-            id: None,
-            activity_id,
-            kind: KIND_WORK.to_string(),
-            start_ms: start,
-            end_ms: end,
-            timer_label: timer_label.to_string(),
-        }
-    }
-
-    fn break_block(timer_label: &str, start: i64, end: Option<i64>) -> Block {
-        Block {
-            id: None,
-            activity_id: None,
-            kind: KIND_BREAK.to_string(),
-            start_ms: start,
-            end_ms: end,
-            timer_label: timer_label.to_string(),
-        }
-    }
-
     #[test]
-    fn init_creates_tables_and_is_idempotent() {
+    fn init_creates_blocks_schema_and_sets_version() {
         let conn = db();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
-        init(&conn).unwrap();
+
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(blocks)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(cols, vec!["id", "name", "start_ms", "end_ms"]);
+
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_blocks_start'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1);
     }
 
     #[test]
-    fn upsert_insert_returns_increasing_ids() {
+    fn init_is_idempotent_on_v2() {
         let mut conn = db();
-        let a1 = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let a2 = upsert_activity(&mut conn, &activity(None, "Почта", "Работа")).unwrap();
-        assert!(a2 > a1);
+        init(&mut conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
-    fn upsert_update_changes_fields_keeps_row_count() {
-        let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let mut edited = activity(Some(id), "Парсер v2", "Личное");
-        edited.efficiency = Some(80);
-        edited.tags = vec!["глубокий".to_string()];
-        upsert_activity(&mut conn, &edited).unwrap();
+    fn init_rejects_unsupported_schema_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "user_version", 99).unwrap();
+        let mut conn = conn;
+        match init(&mut conn) {
+            Err(BlockError::UnsupportedSchema { version }) => assert_eq!(version, 99),
+            other => panic!("expected unsupported schema, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn migrate_v1_copies_closed_work_blocks() {
+        let mut conn = legacy_db();
+        conn.execute(
+            "INSERT INTO activities (id, name, category, started_ms) VALUES (1, 'Парсер', 'Работа', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (id, activity_id, kind, start_ms, end_ms, timer_label)
+             VALUES (10, 1, 'work', 1000, 5000, 'timer-1')",
+            [],
+        )
+        .unwrap();
+
+        init(&mut conn).unwrap();
 
         let rows = query_blocks(&conn, 0, 10_000).unwrap();
-        assert_eq!(rows.len(), 0);
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM activities", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 1);
-        let stored: (String, String, String, Option<i64>) = conn
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, 10);
+        assert_eq!(rows[0].name, "Парсер");
+        assert_eq!(rows[0].start_ms, 1000);
+        assert_eq!(rows[0].end_ms, Some(5000));
+    }
+
+    #[test]
+    fn migrate_v1_drops_break_away_open_and_blank_rows() {
+        let mut conn = legacy_db();
+        conn.execute(
+            "INSERT INTO activities (id, name, category, started_ms)
+             VALUES (1, 'Парсер', 'Работа', 0), (2, '   ', 'Работа', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (id, activity_id, kind, start_ms, end_ms, timer_label)
+             VALUES (1, 1, 'work', 1000, 2000, 't'),
+                    (2, 1, 'break', 2000, 3000, 't'),
+                    (3, 1, 'away', 3000, 4000, 't'),
+                    (4, 1, 'work', 4000, NULL, 't'),
+                    (5, 2, 'work', 5000, 6000, 't'),
+                    (6, NULL, 'work', 6000, 7000, 't')",
+            [],
+        )
+        .unwrap();
+
+        init(&mut conn).unwrap();
+
+        let rows = query_blocks(&conn, 0, 10_000).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, 1);
+    }
+
+    #[test]
+    fn migrate_v1_rolls_back_on_end_before_start() {
+        let mut conn = legacy_db();
+        conn.execute(
+            "INSERT INTO activities (id, name, category, started_ms) VALUES (1, 'Парсер', 'Работа', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (id, activity_id, kind, start_ms, end_ms, timer_label)
+             VALUES (1, 1, 'work', 5000, 1000, 't')",
+            [],
+        )
+        .unwrap();
+
+        assert!(init(&mut conn).is_err());
+
+        // Legacy tables remain intact after rollback.
+        let has_legacy: i64 = conn
             .query_row(
-                "SELECT name, category, tags, efficiency FROM activities WHERE id=?1",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='activities'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_legacy, 1);
+    }
+
+    #[test]
+    fn open_block_inserts_and_returns_id() {
+        let mut conn = db();
+        let id = open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        assert!(id > 0);
+        let stored: (String, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT name, start_ms, end_ms FROM blocks WHERE id=?1",
                 params![id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(stored.0, "Парсер v2");
-        assert_eq!(stored.1, "Личное");
-        assert_eq!(stored.2, "[\"глубокий\"]");
-        assert_eq!(stored.3, Some(80));
+        assert_eq!(stored, ("Парсер".to_string(), 1000, None));
     }
 
     #[test]
-    fn upsert_update_missing_id_errors() {
+    fn open_block_trims_name() {
         let mut conn = db();
-        let err = upsert_activity(&mut conn, &activity(Some(999), "X", "Y")).unwrap_err();
-        assert!(err.contains("not found"));
+        let id = open_block(&mut conn, "  Парсер  ", 1000, None).unwrap();
+        let name: String = conn
+            .query_row("SELECT name FROM blocks WHERE id=?1", params![id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(name, "Парсер");
     }
 
     #[test]
-    fn upsert_rejects_empty_name_and_category() {
+    fn open_block_rejects_empty_or_blank_name() {
         let mut conn = db();
-        assert!(upsert_activity(&mut conn, &activity(None, "  ", "Работа")).is_err());
-        assert!(upsert_activity(&mut conn, &activity(None, "Парсер", "")).is_err());
+        assert!(matches!(
+            open_block(&mut conn, "", 1000, None),
+            Err(BlockError::InvalidName)
+        ));
+        assert!(matches!(
+            open_block(&mut conn, "   ", 1000, None),
+            Err(BlockError::InvalidName)
+        ));
     }
 
     #[test]
-    fn upsert_rejects_bad_status_and_ratings() {
+    fn open_block_rejects_second_open() {
         let mut conn = db();
-        let mut bad_status = activity(None, "X", "Y");
-        bad_status.status = "weird".to_string();
-        assert!(upsert_activity(&mut conn, &bad_status).is_err());
-
-        let mut bad_eff = activity(None, "X", "Y");
-        bad_eff.efficiency = Some(101);
-        assert!(upsert_activity(&mut conn, &bad_eff).is_err());
-
-        let mut bad_use = activity(None, "X", "Y");
-        bad_use.usefulness = Some(-1);
-        assert!(upsert_activity(&mut conn, &bad_use).is_err());
+        let first = open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        match open_block(&mut conn, "Почта", 2000, None) {
+            Err(BlockError::AlreadyOpen { existing_id }) => assert_eq!(existing_id, first),
+            other => panic!("expected already_open, got {other:?}"),
+        }
     }
 
     #[test]
-    fn open_work_block_requires_activity() {
+    fn open_block_with_explicit_end_creates_closed_block() {
         let mut conn = db();
-        let err = open_block(&mut conn, &work_block("timer-1", None, 0, None)).unwrap_err();
-        assert!(err.contains("activity_id"));
-    }
-
-    #[test]
-    fn open_break_block_forces_null_activity() {
-        let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let mut b = break_block("timer-1", 0, None);
-        b.activity_id = Some(id);
-        let block_id = open_block(&mut conn, &b).unwrap();
-        let stored: Option<i64> = conn
+        let id = open_block(&mut conn, "Еда", 6_600_000, Some(7_800_000)).unwrap();
+        let stored: (String, i64, Option<i64>) = conn
             .query_row(
-                "SELECT activity_id FROM blocks WHERE id=?1",
-                params![block_id],
-                |row| row.get(0),
+                "SELECT name, start_ms, end_ms FROM blocks WHERE id=?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(stored, None);
+        assert_eq!(stored, ("Еда".to_string(), 6_600_000, Some(7_800_000)));
     }
 
     #[test]
-    fn open_second_block_same_label_errors() {
+    fn open_block_with_end_does_not_conflict_with_open_block() {
         let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        open_block(&mut conn, &work_block("timer-1", Some(id), 0, None)).unwrap();
-        let err = open_block(&mut conn, &break_block("timer-1", 100, None)).unwrap_err();
-        assert!(err.contains("open block"));
+        open_block(&mut conn, "Работа", 1_000, None).unwrap();
+        // A closed block may be created even while another block is open.
+        let id = open_block(&mut conn, "Еда", 6_600_000, Some(7_800_000)).unwrap();
+        assert!(id > 0);
     }
 
     #[test]
-    fn open_block_on_second_timer_while_another_has_open_block_errors() {
+    fn open_block_with_end_rejects_end_before_start() {
         let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        open_block(&mut conn, &work_block("timer-1", Some(id), 0, None)).unwrap();
-        let err = open_block(&mut conn, &work_block("timer-2", Some(id), 100, None)).unwrap_err();
-        assert!(err.contains("timer-1"));
-        assert!(err.contains("open block"));
+        assert!(matches!(
+            open_block(&mut conn, "Еда", 7_800_000, Some(6_600_000)),
+            Err(BlockError::InvalidEnd { .. })
+        ));
     }
 
     #[test]
-    fn open_block_allowed_after_other_timer_closes() {
+    fn open_block_with_end_rejects_overlap() {
         let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        open_block(&mut conn, &work_block("timer-1", Some(id), 0, None)).unwrap();
-        close_block(&mut conn, "timer-1", 50).unwrap();
-        let b2 = open_block(&mut conn, &work_block("timer-2", Some(id), 100, None)).unwrap();
-        let got = get_global_open_block(&conn).unwrap().unwrap();
-        assert_eq!(got.id, b2);
-        assert_eq!(got.timer_label, "timer-2");
+        open_block(&mut conn, "A", 1_000, Some(3_000)).unwrap();
+        assert!(matches!(
+            open_block(&mut conn, "B", 2_000, Some(4_000)),
+            Err(BlockError::Overlap { .. })
+        ));
     }
 
     #[test]
-    fn get_global_open_block_returns_single_open_any_timer() {
+    fn unique_index_blocks_second_open_at_db_level() {
         let mut conn = db();
-        assert_eq!(get_global_open_block(&conn).unwrap(), None);
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let b = open_block(&mut conn, &work_block("timer-1", Some(id), 0, None)).unwrap();
-        let got = get_global_open_block(&conn).unwrap().unwrap();
-        assert_eq!(got.id, b);
-        assert_eq!(got.activity_name.as_deref(), Some("Парсер"));
-        close_block(&mut conn, "timer-1", 50).unwrap();
-        assert_eq!(get_global_open_block(&conn).unwrap(), None);
+        open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        let direct = conn.execute(
+            "INSERT INTO blocks (name, start_ms, end_ms) VALUES ('X', 2000, NULL)",
+            [],
+        );
+        assert!(direct.is_err());
     }
 
     #[test]
-    fn pause_break_block_replaces_work_within_same_timer() {
-        let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        open_block(&mut conn, &work_block("timer-1", Some(id), 0, None)).unwrap();
-        close_block(&mut conn, "timer-1", 50).unwrap();
-        open_block(&mut conn, &break_block("timer-1", 50, None)).unwrap();
-        let got = get_global_open_block(&conn).unwrap().unwrap();
-        assert_eq!(got.kind, KIND_BREAK);
-        assert_eq!(got.activity_id, None);
+    fn check_constraint_rejects_end_before_start() {
+        let conn = db();
+        let direct = conn.execute(
+            "INSERT INTO blocks (name, start_ms, end_ms) VALUES ('X', 5000, 1000)",
+            [],
+        );
+        assert!(direct.is_err());
     }
 
     #[test]
-    fn open_block_rejects_bad_kind() {
+    fn close_block_sets_end_and_returns_id() {
         let mut conn = db();
-        let mut b = break_block("timer-1", 0, None);
-        b.kind = "rest".to_string();
-        assert!(open_block(&mut conn, &b).is_err());
-    }
-
-    #[test]
-    fn close_block_closes_open_one_and_returns_id() {
-        let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let block_id = open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
-        let closed = close_block(&mut conn, "timer-1", 5_000).unwrap();
-        assert_eq!(closed, Some(block_id));
+        let id = open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        let closed = close_block(&mut conn, 5000).unwrap();
+        assert_eq!(closed, Some(id));
         let end: Option<i64> = conn
-            .query_row(
-                "SELECT end_ms FROM blocks WHERE id=?1",
-                params![block_id],
-                |row| row.get(0),
-            )
+            .query_row("SELECT end_ms FROM blocks WHERE id=?1", params![id], |row| {
+                row.get(0)
+            })
             .unwrap();
-        assert_eq!(end, Some(5_000));
+        assert_eq!(end, Some(5000));
     }
 
     #[test]
     fn close_block_with_nothing_open_returns_none() {
         let mut conn = db();
-        assert_eq!(close_block(&mut conn, "timer-1", 5_000).unwrap(), None);
+        assert_eq!(close_block(&mut conn, 5000).unwrap(), None);
     }
 
     #[test]
     fn close_block_end_before_start_errors() {
         let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        open_block(&mut conn, &work_block("timer-1", Some(id), 10_000, None)).unwrap();
-        let err = close_block(&mut conn, "timer-1", 1_000).unwrap_err();
-        assert!(err.contains("before start"));
+        open_block(&mut conn, "Парсер", 10_000, None).unwrap();
+        assert!(matches!(
+            close_block(&mut conn, 1000),
+            Err(BlockError::InvalidEnd { .. })
+        ));
     }
 
     #[test]
-    fn finish_sets_status_ratings_and_ended() {
+    fn delete_block_removes_row() {
         let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        finish_activity(&mut conn, id, Some(80), Some(60), 9_000).unwrap();
-        let (status, eff, useful, ended): (String, Option<i64>, Option<i64>, Option<i64>) = conn
+        let id = open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        close_block(&mut conn, 2000).unwrap();
+        delete_block(&mut conn, id).unwrap();
+        assert_eq!(query_blocks(&conn, 0, 10_000).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn delete_open_block_leaves_no_open_block() {
+        let mut conn = db();
+        let id = open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        delete_block(&mut conn, id).unwrap();
+        assert_eq!(close_block(&mut conn, 2000).unwrap(), None);
+    }
+
+    #[test]
+    fn delete_block_unknown_returns_not_found() {
+        let mut conn = db();
+        assert!(matches!(
+            delete_block(&mut conn, 999),
+            Err(BlockError::NotFound { id: 999 })
+        ));
+    }
+
+    #[test]
+    fn update_block_changes_name_and_times() {
+        let mut conn = db();
+        let id = open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        close_block(&mut conn, 2000).unwrap();
+        update_block(&mut conn, id, "Парсер v2", 1500, Some(2500)).unwrap();
+        let stored: (String, i64, Option<i64>) = conn
             .query_row(
-                "SELECT status, efficiency, usefulness, ended_ms FROM activities WHERE id=?1",
+                "SELECT name, start_ms, end_ms FROM blocks WHERE id=?1",
                 params![id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(status, STATUS_FINISHED);
-        assert_eq!((eff, useful, ended), (Some(80), Some(60), Some(9_000)));
+        assert_eq!(stored, ("Парсер v2".to_string(), 1500, Some(2500)));
     }
 
     #[test]
-    fn finish_rejects_out_of_range_ratings() {
+    fn update_block_rejects_empty_name() {
         let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        assert!(finish_activity(&mut conn, id, Some(150), None, 1).is_err());
-        assert!(finish_activity(&mut conn, id, None, Some(-3), 1).is_err());
+        let id = open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        close_block(&mut conn, 2000).unwrap();
+        assert!(matches!(
+            update_block(&mut conn, id, "  ", 1000, Some(2000)),
+            Err(BlockError::InvalidName)
+        ));
     }
 
     #[test]
-    fn finish_missing_activity_errors() {
+    fn update_block_rejects_end_before_start() {
         let mut conn = db();
-        assert!(finish_activity(&mut conn, 999, Some(1), None, 1).is_err());
+        let id = open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        close_block(&mut conn, 2000).unwrap();
+        assert!(matches!(
+            update_block(&mut conn, id, "Парсер", 5000, Some(2000)),
+            Err(BlockError::InvalidEnd { .. })
+        ));
     }
 
     #[test]
-    fn query_filters_by_range_and_orders() {
+    fn update_block_rejects_unknown_id() {
         let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let b1 = open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
-        close_block(&mut conn, "timer-1", 2_000).unwrap();
-        open_block(&mut conn, &work_block("timer-2", Some(id), 5_000, None)).unwrap();
-        close_block(&mut conn, "timer-2", 6_000).unwrap();
-        open_block(&mut conn, &work_block("timer-3", Some(id), 9_000, None)).unwrap();
-        close_block(&mut conn, "timer-3", 10_000).unwrap();
+        assert!(matches!(
+            update_block(&mut conn, 999, "Парсер", 1000, Some(2000)),
+            Err(BlockError::NotFound { id: 999 })
+        ));
+    }
 
-        let inside = query_blocks(&conn, 4_000, 8_000).unwrap();
+    #[test]
+    fn update_block_open_when_another_open_is_rejected() {
+        let mut conn = db();
+        open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        let second = open_block(&mut conn, "Почта", 2000, None);
+        assert!(second.is_err());
+        // close the single open and reopen a closed block as open
+        close_block(&mut conn, 3000).unwrap();
+        let closed = open_block(&mut conn, "Почта", 4000, None).unwrap();
+        close_block(&mut conn, 5000).unwrap();
+        // now try to make `closed` open while another is open
+        let _other = open_block(&mut conn, "Другое", 6000, None).unwrap();
+        assert!(matches!(
+            update_block(&mut conn, closed, "Почта", 4000, None),
+            Err(BlockError::AlreadyOpen { .. })
+        ));
+    }
+
+    #[test]
+    fn update_block_overlap_is_rejected() {
+        let mut conn = db();
+        let a = open_block(&mut conn, "A", 1000, None).unwrap();
+        close_block(&mut conn, 3000).unwrap();
+        let b = open_block(&mut conn, "B", 4000, None).unwrap();
+        close_block(&mut conn, 6000).unwrap();
+
+        // Try to extend B's start into A's range [1000,3000).
+        assert!(matches!(
+            update_block(&mut conn, b, "B", 2000, Some(6000)),
+            Err(BlockError::Overlap { .. })
+        ));
+        let _ = a;
+    }
+
+    #[test]
+    fn query_filters_by_half_open_range_and_orders() {
+        let mut conn = db();
+        let a = open_block(&mut conn, "A", 1000, None).unwrap();
+        close_block(&mut conn, 2000).unwrap();
+        let b = open_block(&mut conn, "B", 5000, None).unwrap();
+        close_block(&mut conn, 6000).unwrap();
+        let c = open_block(&mut conn, "C", 9000, None).unwrap();
+        close_block(&mut conn, 10_000).unwrap();
+
+        let inside = query_blocks(&conn, 4000, 8000).unwrap();
         assert_eq!(inside.len(), 1);
-        assert_eq!(inside[0].id, b1 + 1);
+        assert_eq!(inside[0].id, b);
+        let _ = (a, c);
     }
 
     #[test]
-    fn query_joins_activity_fields_and_keeps_breaks_null() {
+    fn query_includes_open_block_with_null_end() {
         let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let work_id = open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
-        close_block(&mut conn, "timer-1", 2_000).unwrap();
-        open_block(&mut conn, &break_block("timer-1", 2_000, None)).unwrap();
-        close_block(&mut conn, "timer-1", 3_000).unwrap();
-
-        let rows = query_blocks(&conn, 0, 10_000).unwrap();
-        assert_eq!(rows.len(), 2);
-
-        let work = rows.iter().find(|r| r.id == work_id).unwrap();
-        assert_eq!(work.activity_name.as_deref(), Some("Парсер"));
-        assert_eq!(work.activity_category.as_deref(), Some("Работа"));
-        assert_eq!(work.status.as_deref(), Some(STATUS_ACTIVE));
-
-        let brk = rows.iter().find(|r| r.id != work_id).unwrap();
-        assert_eq!(brk.kind, KIND_BREAK);
-        assert_eq!(brk.activity_id, None);
-        assert_eq!(brk.activity_name, None);
-        assert_eq!(brk.efficiency, None);
-    }
-
-    #[test]
-    fn query_includes_open_blocks() {
-        let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
+        open_block(&mut conn, "Парсер", 1000, None).unwrap();
         let rows = query_blocks(&conn, 0, 10_000).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].end_ms, None);
     }
 
     #[test]
-    fn suggestions_return_distinct_categories_and_activities() {
-        let mut conn = db();
-        upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        upsert_activity(&mut conn, &activity(None, "Почта", "Работа")).unwrap();
-        upsert_activity(&mut conn, &activity(None, "Тренировка", "Спорт")).unwrap();
-
-        let s = suggestions(&conn).unwrap();
-        assert_eq!(s.categories, vec!["Работа".to_string(), "Спорт".to_string()]);
-        assert_eq!(s.activities.len(), 3);
-        assert!(s.activities.iter().all(|a| a.name != "" && !a.category.is_empty()));
+    fn query_rejects_inverted_range() {
+        let conn = db();
+        assert!(matches!(
+            query_blocks(&conn, 5000, 1000),
+            Err(BlockError::InvalidQueryRange { .. })
+        ));
     }
 
     #[test]
-    fn reconcile_closes_only_stale_open_blocks() {
+    fn query_equal_range_returns_empty() {
         let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let stale = open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
-        close_block(&mut conn, "timer-1", 1_500).unwrap();
-        let fresh = open_block(&mut conn, &work_block("timer-2", Some(id), 8_000, None)).unwrap();
-        close_block(&mut conn, "timer-2", 8_500).unwrap();
-        conn.execute(
-            "INSERT INTO blocks (activity_id, kind, start_ms, end_ms, timer_label) VALUES (?1, 'work', ?2, NULL, 'timer-3')",
-            params![id, 2_000],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO blocks (activity_id, kind, start_ms, end_ms, timer_label) VALUES (?1, 'work', ?2, NULL, 'timer-4')",
-            params![id, 9_000],
-        )
-        .unwrap();
-
-        let closed = reconcile(&mut conn, 5_000).unwrap();
-        assert_eq!(closed, 1);
-
-        let stale_end: Option<i64> = conn
-            .query_row(
-                "SELECT end_ms FROM blocks WHERE id=?1",
-                params![stale],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(stale_end, Some(1_500));
-        let fresh_end: Option<i64> = conn
-            .query_row(
-                "SELECT end_ms FROM blocks WHERE id=?1",
-                params![fresh],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(fresh_end, Some(8_500));
-        let legacy_stale_end: Option<i64> = conn
-            .query_row(
-                "SELECT end_ms FROM blocks WHERE timer_label='timer-3'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(legacy_stale_end, Some(2_000));
-        let legacy_fresh_end: Option<i64> = conn
-            .query_row(
-                "SELECT end_ms FROM blocks WHERE timer_label='timer-4'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(legacy_fresh_end, None);
+        open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        close_block(&mut conn, 2000).unwrap();
+        assert_eq!(query_blocks(&conn, 2000, 2000).unwrap().len(), 0);
     }
 
     #[test]
-    fn delete_block_removes_single_row() {
+    fn suggestions_are_distinct_and_ordered_by_recency() {
         let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let b1 = open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
-        close_block(&mut conn, "timer-1", 2_000).unwrap();
-        let b2 = open_block(&mut conn, &work_block("timer-2", Some(id), 3_000, None)).unwrap();
-        close_block(&mut conn, "timer-2", 4_000).unwrap();
+        let a = open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        close_block(&mut conn, 2000).unwrap();
+        let b = open_block(&mut conn, "Почта", 3000, None).unwrap();
+        close_block(&mut conn, 4000).unwrap();
+        let c = open_block(&mut conn, "Парсер", 5000, None).unwrap();
+        close_block(&mut conn, 6000).unwrap();
+        let _ = (a, b, c);
 
-        delete_block(&mut conn, b1).unwrap();
-        let rows = query_blocks(&conn, 0, 10_000).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, b2);
+        let names = suggestions(&conn).unwrap();
+        assert_eq!(names, vec!["Парсер".to_string(), "Почта".to_string()]);
     }
 
     #[test]
-    fn get_open_block_returns_none_when_closed_or_absent() {
+    fn reconcile_deletes_all_open_blocks() {
         let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
-        close_block(&mut conn, "timer-1", 2_000).unwrap();
+        open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        close_block(&mut conn, 2000).unwrap();
+        open_block(&mut conn, "Почта", 3000, None).unwrap();
 
-        assert_eq!(get_open_block(&conn, "timer-1").unwrap(), None);
-        assert_eq!(get_open_block(&conn, "timer-9").unwrap(), None);
+        let removed = reconcile(&mut conn).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(query_blocks(&conn, 0, 10_000).unwrap().len(), 1);
     }
 
     #[test]
-    fn get_open_block_returns_joined_open_work_block() {
+    fn reconcile_is_idempotent_and_keeps_closed() {
         let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let bid = open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
+        open_block(&mut conn, "Парсер", 1000, None).unwrap();
+        close_block(&mut conn, 2000).unwrap();
 
-        let got = get_open_block(&conn, "timer-1").unwrap().unwrap();
-        assert_eq!(got.id, bid);
-        assert_eq!(got.activity_id, Some(id));
-        assert_eq!(got.kind, KIND_WORK);
-        assert_eq!(got.end_ms, None);
-        assert_eq!(got.activity_name.as_deref(), Some("Парсер"));
-        assert_eq!(got.activity_category.as_deref(), Some("Работа"));
-    }
-
-    #[test]
-    fn get_open_block_returns_open_break_with_null_activity() {
-        let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
-        close_block(&mut conn, "timer-1", 2_000).unwrap();
-        open_block(&mut conn, &break_block("timer-1", 2_000, None)).unwrap();
-
-        let got = get_open_block(&conn, "timer-1").unwrap().unwrap();
-        assert_eq!(got.kind, KIND_BREAK);
-        assert_eq!(got.activity_id, None);
-        assert_eq!(got.activity_name, None);
-    }
-
-    #[test]
-    fn suggestions_include_activity_status() {
-        let mut conn = db();
-        upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let s = suggestions(&conn).unwrap();
-        assert_eq!(s.activities.len(), 1);
-        assert_eq!(s.activities[0].status, STATUS_ACTIVE);
-    }
-
-    #[test]
-    fn delete_activity_cascades_blocks() {
-        let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
-        close_block(&mut conn, "timer-1", 2_000).unwrap();
-
-        delete_activity(&mut conn, id).unwrap();
-        assert_eq!(query_blocks(&conn, 0, 10_000).unwrap().len(), 0);
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM activities", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn update_block_changes_times_and_kind() {
-        let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let b = open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
-        close_block(&mut conn, "timer-1", 2_000).unwrap();
-
-        let mut edited = work_block("timer-1", Some(id), 1_500, Some(2_500));
-        edited.id = Some(b);
-        update_block(&mut conn, &edited).unwrap();
-
-        let rows = query_blocks(&conn, 0, 10_000).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].start_ms, 1_500);
-        assert_eq!(rows[0].end_ms, Some(2_500));
-    }
-
-    #[test]
-    fn update_block_validates_id_kind_and_times() {
-        let mut conn = db();
-        let id = upsert_activity(&mut conn, &activity(None, "Парсер", "Работа")).unwrap();
-        let b = open_block(&mut conn, &work_block("timer-1", Some(id), 1_000, None)).unwrap();
-
-        let no_id = work_block("timer-1", Some(id), 1_000, Some(2_000));
-        assert!(update_block(&mut conn, &no_id).is_err());
-
-        let mut bad_end = work_block("timer-1", Some(id), 5_000, Some(2_000));
-        bad_end.id = Some(b);
-        assert!(update_block(&mut conn, &bad_end).is_err());
-
-        let mut missing = work_block("timer-1", Some(id), 1_000, Some(2_000));
-        missing.id = Some(999);
-        assert!(update_block(&mut conn, &missing).is_err());
+        assert_eq!(reconcile(&mut conn).unwrap(), 0);
+        assert_eq!(query_blocks(&conn, 0, 10_000).unwrap().len(), 1);
     }
 }

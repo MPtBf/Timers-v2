@@ -27,17 +27,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const HUB_LABEL: &str = "hub";
 const TIMER_PREFIX: &str = "timer-";
-const TASK_PANEL_PREFIX: &str = "task-";
-const FINISH_PANEL_PREFIX: &str = "finish-";
+const DASHBOARD_LABEL: &str = "dashboard";
 const SESSION_FILE: &str = "session.json";
 const SESSION_TMP_FILE: &str = "session.json.tmp";
 const DEFAULT_W: f64 = 95.0;
 const DEFAULT_H: f64 = 96.0;
-const TASK_PANEL_W: f64 = 280.0;
-const TASK_PANEL_H: f64 = 219.0;
-const FINISH_PANEL_W: f64 = 280.0;
-const FINISH_PANEL_H: f64 = 204.0;
-const PANEL_GAP: f64 = 6.0;
+const DASHBOARD_DEFAULT_W: f64 = 960.0;
+const DASHBOARD_DEFAULT_H: f64 = 600.0;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -52,34 +48,11 @@ struct TimerSnapshot {
     y: i32,
     w: u32,
     h: u32,
-    activity_id: Option<i64>,
 }
 
 struct PendingInit(Mutex<HashMap<String, TimerSnapshot>>);
 
-#[derive(serde::Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct PanelInit {
-    timer_label: String,
-    log_enabled: Option<bool>,
-    auto_pause: Option<bool>,
-    activity_id: Option<i64>,
-    activity_name: Option<String>,
-    minutes: Option<f64>,
-}
-
-struct PendingPanelInit(Mutex<HashMap<String, PanelInit>>);
-
-struct ActivityDb(Mutex<rusqlite::Connection>);
-
-const RECONCILE_STALE_MS: i64 = 300_000;
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+struct BlocksDb(Mutex<rusqlite::Connection>);
 
 fn hwnd(window: &tauri::WebviewWindow) -> HWND {
     window.hwnd().unwrap()
@@ -113,6 +86,7 @@ fn set_click_through(window: tauri::WebviewWindow, enabled: bool) {
     let layered = new | WS_EX_LAYERED;
     let nudge = (current & WS_EX_TRANSPARENT) != (new & WS_EX_TRANSPARENT);
     let current_opacity = if enabled { 128 } else { 255 };
+    log::info!("[diag] set_click_through {} enabled={enabled} nudge={nudge}", window.label());
     apply_window_style(h, layered, current_opacity, nudge);
 }
 
@@ -122,6 +96,7 @@ fn set_opacity(window: tauri::WebviewWindow, opacity: f64) {
     let current = unsafe { GetWindowLongW(h, GWL_EXSTYLE) };
     let current = WINDOW_EX_STYLE(current as u32);
     let layered = current | WS_EX_LAYERED;
+    log::info!("[diag] set_opacity {} opacity={opacity}", window.label());
     apply_window_style(h, layered, (opacity * 255.0) as u8, false);
 }
 
@@ -142,6 +117,7 @@ fn apply_dwm(window: tauri::WebviewWindow) {
 #[tauri::command]
 fn raise_window(window: tauri::WebviewWindow) {
     let h = hwnd(&window);
+    log::info!("[diag] raise_window {}", window.label());
     unsafe {
         let _ = SetWindowPos(h, Some(HWND_TOPMOST), 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -179,6 +155,7 @@ fn get_cursor_pos() -> (i32, i32) {
 #[tauri::command]
 fn flash_window(window: tauri::WebviewWindow) {
     let h = hwnd(&window);
+    log::info!("[diag] flash_window {}", window.label());
     let info = FLASHWINFO {
         cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
         hwnd: h,
@@ -195,6 +172,7 @@ static TICK_WAV: &[u8] = include_bytes!("../sounds/tick.wav");
 
 #[tauri::command]
 fn beep_system() {
+    log::info!("[diag] beep_system");
     unsafe {
         let _ = PlaySoundW(
             PCWSTR(TICK_WAV.as_ptr() as *const u16),
@@ -249,124 +227,29 @@ fn get_timer_init(window: WebviewWindow, state: State<PendingInit>) -> Option<Ti
     state.0.lock().unwrap().remove(&label)
 }
 
-fn panel_position(
-    app: &tauri::AppHandle,
-    timer_label: &str,
-    panel_w: f64,
-    panel_h: f64,
-) -> (f64, f64) {
-    if let Some(win) = app.get_webview_window(timer_label) {
-        if let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) {
-            let scale = win.scale_factor().unwrap_or(1.0);
-            let timer_x = pos.x as f64 / scale;
-            let timer_y = pos.y as f64 / scale;
-            let timer_w = size.width as f64 / scale;
-            let timer_h = size.height as f64 / scale;
-            let (min_x, min_y, max_x, max_y) = match win.current_monitor() {
-                Ok(Some(m)) => {
-                    let p = m.position();
-                    let s = m.size();
-                    (
-                        p.x as f64 / scale,
-                        p.y as f64 / scale,
-                        (p.x as f64 + s.width as f64) / scale,
-                        (p.y as f64 + s.height as f64) / scale,
-                    )
-                }
-                _ => (0.0, 0.0, 1920.0, 1080.0),
-            };
-            let center_x = timer_x + timer_w / 2.0;
-            let x = (center_x - panel_w / 2.0).clamp(min_x, (max_x - panel_w).max(min_x));
-            let above_y = timer_y - panel_h - PANEL_GAP;
-            let y = if above_y >= min_y {
-                above_y
-            } else {
-                (timer_y + timer_h + PANEL_GAP).clamp(min_y, (max_y - panel_h).max(min_y))
-            };
-            return (x, y);
-        }
-    }
-    (PANEL_GAP + 140.0, PANEL_GAP + 140.0)
-}
-
-fn create_panel_window(
-    app: &tauri::AppHandle,
-    label: &str,
-    query: &str,
-    init: PanelInit,
-    width: f64,
-    height: f64,
-    pending: &PendingPanelInit,
-) -> Result<(), String> {
-    if app.get_webview_window(label).is_some() {
+#[tauri::command]
+async fn create_dashboard_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window(DASHBOARD_LABEL) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
         return Ok(());
     }
-    let (x, y) = panel_position(app, &init.timer_label, width, height);
-    pending.0.lock().unwrap().insert(label.to_string(), init);
-    let url = WebviewUrl::App(format!("index.html{query}").into());
-    WebviewWindowBuilder::new(app, label.to_string(), url)
-        .title("Timer")
-        .inner_size(width, height)
-        .position(x, y)
-        .resizable(false)
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .focused(true)
+    let url = WebviewUrl::App("index.html?dashboard=true".into());
+    WebviewWindowBuilder::new(&app, DASHBOARD_LABEL, url)
+        .title("Календарь")
+        .inner_size(DASHBOARD_DEFAULT_W, DASHBOARD_DEFAULT_H)
+        .resizable(true)
+        .decorations(true)
+        .transparent(false)
+        .always_on_top(false)
+        .skip_taskbar(false)
+        .center()
         .build()
         .map_err(|e| {
-            eprintln!("create_panel_window build error: {e:?}");
+            eprintln!("create_dashboard_window build error: {e:?}");
             e.to_string()
         })?;
     Ok(())
-}
-
-#[tauri::command]
-async fn create_task_panel(
-    app: tauri::AppHandle,
-    timer_label: String,
-    log_enabled: Option<bool>,
-    auto_pause: Option<bool>,
-    minutes: Option<f64>,
-    state: State<'_, PendingPanelInit>,
-) -> Result<(), String> {
-    let init = PanelInit {
-        timer_label: timer_label.clone(),
-        log_enabled,
-        auto_pause,
-        activity_id: None,
-        activity_name: None,
-        minutes,
-    };
-    let label = format!("{TASK_PANEL_PREFIX}{timer_label}");
-    create_panel_window(&app, &label, &format!("?task={timer_label}"), init, TASK_PANEL_W, TASK_PANEL_H, state.inner())
-}
-
-#[tauri::command]
-async fn create_finish_panel(
-    app: tauri::AppHandle,
-    timer_label: String,
-    activity_id: Option<i64>,
-    activity_name: Option<String>,
-    state: State<'_, PendingPanelInit>,
-) -> Result<(), String> {
-    let init = PanelInit {
-        timer_label: timer_label.clone(),
-        log_enabled: None,
-        auto_pause: None,
-        activity_id,
-        activity_name,
-        minutes: None,
-    };
-    let label = format!("{FINISH_PANEL_PREFIX}{timer_label}");
-    create_panel_window(&app, &label, &format!("?finish={timer_label}"), init, FINISH_PANEL_W, FINISH_PANEL_H, state.inner())
-}
-
-#[tauri::command]
-fn get_panel_init(window: WebviewWindow, state: State<PendingPanelInit>) -> Option<PanelInit> {
-    let label = window.label().to_string();
-    state.0.lock().unwrap().remove(&label)
 }
 
 #[tauri::command]
@@ -453,100 +336,103 @@ fn get_activity_db_path(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn activity_upsert(
-    state: State<'_, ActivityDb>,
-    activity: activity::Activity,
+fn activity_init(state: State<'_, BlocksDb>) -> Result<(), String> {
+    let mut conn = state.0.lock().unwrap();
+    activity::init(&mut conn).map_err(|e| e.to_string())
+}
+
+fn emit_blocks_changed(app: &tauri::AppHandle) {
+    let _ = app.emit("blocks-changed", ());
+}
+
+#[tauri::command]
+fn block_open(
+    app: tauri::AppHandle,
+    state: State<'_, BlocksDb>,
+    name: String,
+    start_ms: i64,
+    end_ms: Option<i64>,
 ) -> Result<i64, String> {
-    let mut conn = state.0.lock().unwrap();
-    activity::upsert_activity(&mut conn, &activity)
+    let id = {
+        let mut conn = state.0.lock().unwrap();
+        activity::open_block(&mut conn, &name, start_ms, end_ms).map_err(|e| e.to_string())?
+    };
+    emit_blocks_changed(&app);
+    Ok(id)
 }
 
 #[tauri::command]
-fn activity_open_block(state: State<'_, ActivityDb>, block: activity::Block) -> Result<i64, String> {
-    let mut conn = state.0.lock().unwrap();
-    activity::open_block(&mut conn, &block)
-}
-
-#[tauri::command]
-fn activity_close_block(
-    state: State<'_, ActivityDb>,
-    timer_label: String,
+fn block_close(
+    app: tauri::AppHandle,
+    state: State<'_, BlocksDb>,
     end_ms: i64,
 ) -> Result<Option<i64>, String> {
-    let mut conn = state.0.lock().unwrap();
-    activity::close_block(&mut conn, &timer_label, end_ms)
+    let id = {
+        let mut conn = state.0.lock().unwrap();
+        activity::close_block(&mut conn, end_ms).map_err(|e| e.to_string())?
+    };
+    emit_blocks_changed(&app);
+    Ok(id)
 }
 
 #[tauri::command]
-fn activity_finish(
-    state: State<'_, ActivityDb>,
-    activity_id: i64,
-    efficiency: Option<i64>,
-    usefulness: Option<i64>,
-    ended_ms: i64,
+fn block_delete(
+    app: tauri::AppHandle,
+    state: State<'_, BlocksDb>,
+    id: i64,
 ) -> Result<(), String> {
-    let mut conn = state.0.lock().unwrap();
-    activity::finish_activity(&mut conn, activity_id, efficiency, usefulness, ended_ms)
+    {
+        let mut conn = state.0.lock().unwrap();
+        activity::delete_block(&mut conn, id).map_err(|e| e.to_string())?;
+    }
+    emit_blocks_changed(&app);
+    Ok(())
 }
 
 #[tauri::command]
-fn activity_update_block(
-    state: State<'_, ActivityDb>,
-    block: activity::Block,
+fn block_update(
+    app: tauri::AppHandle,
+    state: State<'_, BlocksDb>,
+    id: i64,
+    name: String,
+    start_ms: i64,
+    end_ms: Option<i64>,
 ) -> Result<(), String> {
-    let mut conn = state.0.lock().unwrap();
-    activity::update_block(&mut conn, &block)
+    {
+        let mut conn = state.0.lock().unwrap();
+        activity::update_block(&mut conn, id, &name, start_ms, end_ms).map_err(|e| e.to_string())?;
+    }
+    emit_blocks_changed(&app);
+    Ok(())
 }
 
 #[tauri::command]
-fn activity_delete_block(state: State<'_, ActivityDb>, id: i64) -> Result<(), String> {
-    let mut conn = state.0.lock().unwrap();
-    activity::delete_block(&mut conn, id)
-}
-
-#[tauri::command]
-fn activity_delete_activity(state: State<'_, ActivityDb>, id: i64) -> Result<(), String> {
-    let mut conn = state.0.lock().unwrap();
-    activity::delete_activity(&mut conn, id)
-}
-
-#[tauri::command]
-fn activity_query(
-    state: State<'_, ActivityDb>,
+fn block_query(
+    state: State<'_, BlocksDb>,
     from_ms: i64,
     to_ms: i64,
-) -> Result<Vec<activity::ActivityBlockRow>, String> {
+) -> Result<Vec<activity::Block>, String> {
     let conn = state.0.lock().unwrap();
-    activity::query_blocks(&conn, from_ms, to_ms)
+    activity::query_blocks(&conn, from_ms, to_ms).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn activity_get_open_block(
-    state: State<'_, ActivityDb>,
-    timer_label: String,
-) -> Result<Option<activity::ActivityBlockRow>, String> {
+fn block_suggestions(state: State<'_, BlocksDb>) -> Result<Vec<String>, String> {
     let conn = state.0.lock().unwrap();
-    activity::get_open_block(&conn, &timer_label)
+    activity::suggestions(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn activity_get_global_open_block(
-    state: State<'_, ActivityDb>,
-) -> Result<Option<activity::ActivityBlockRow>, String> {
-    let conn = state.0.lock().unwrap();
-    activity::get_global_open_block(&conn)
-}
-
-#[tauri::command]
-fn activity_suggestions(state: State<'_, ActivityDb>) -> Result<activity::Suggestions, String> {
-    let conn = state.0.lock().unwrap();
-    activity::suggestions(&conn)
-}
-
-#[tauri::command]
-fn activity_reconcile(state: State<'_, ActivityDb>, cutoff_ms: i64) -> Result<usize, String> {
-    let mut conn = state.0.lock().unwrap();
-    activity::reconcile(&mut conn, cutoff_ms)
+fn activity_reconcile(
+    app: tauri::AppHandle,
+    state: State<'_, BlocksDb>,
+) -> Result<usize, String> {
+    let n = {
+        let mut conn = state.0.lock().unwrap();
+        activity::reconcile(&mut conn).map_err(|e| e.to_string())?
+    };
+    emit_blocks_changed(&app);
+    Ok(n)
 }
 
 #[tauri::command]
@@ -633,7 +519,6 @@ pub fn run() {
                 .build(),
         )
         .manage(PendingInit(Mutex::new(HashMap::new())))
-        .manage(PendingPanelInit(Mutex::new(HashMap::new())))
         .invoke_handler(tauri::generate_handler![
             set_click_through,
             set_opacity,
@@ -646,9 +531,7 @@ pub fn run() {
             get_cursor_pos,
             create_timer_window,
             get_timer_init,
-            create_task_panel,
-            create_finish_panel,
-            get_panel_init,
+            create_dashboard_window,
             hide_timers,
             show_timers,
             set_timers_always_on_top,
@@ -658,17 +541,13 @@ pub fn run() {
             save_session,
             load_session,
             get_activity_db_path,
-            activity_upsert,
-            activity_open_block,
-            activity_close_block,
-            activity_finish,
-            activity_update_block,
-            activity_delete_block,
-            activity_delete_activity,
-            activity_query,
-            activity_get_open_block,
-            activity_get_global_open_block,
-            activity_suggestions,
+            activity_init,
+            block_open,
+            block_close,
+            block_delete,
+            block_update,
+            block_query,
+            block_suggestions,
             activity_reconcile,
             quit_all,
         ]);
@@ -689,16 +568,24 @@ pub fn run() {
             if let Some(dir) = app.path().app_config_dir().ok() {
                 let _ = fs::create_dir_all(&dir);
                 let path = dir.join(activity::ACTIVITY_DB_FILE);
-                if let Ok(conn) = rusqlite::Connection::open(&path) {
-                    if activity::init(&conn).is_ok() {
-                        let db = ActivityDb(Mutex::new(conn));
-                        let cutoff = now_ms() - RECONCILE_STALE_MS;
-                        if let Ok(mut guard) = db.0.lock() {
-                            let _ = activity::reconcile(&mut guard, cutoff);
-                        }
-                        app.manage(db);
+                let mut conn = match rusqlite::Connection::open(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("failed to open activity db: {e}");
+                        return Err(Box::new(std::io::Error::other(e.to_string())));
+                    }
+                };
+                if let Err(e) = activity::init(&mut conn) {
+                    eprintln!("activity db init failed: {e}");
+                    return Err(Box::new(std::io::Error::other(e.to_string())));
+                }
+                let db = BlocksDb(Mutex::new(conn));
+                if let Ok(mut guard) = db.0.lock() {
+                    if let Err(e) = activity::reconcile(&mut guard) {
+                        eprintln!("activity reconcile failed: {e}");
                     }
                 }
+                app.manage(db);
             }
 
             if let Some(hub) = app.get_webview_window(HUB_LABEL) {
