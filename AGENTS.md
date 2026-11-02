@@ -7,15 +7,15 @@ Port of the original PyQt6 project (was at `C:\Users\ediko\PycharmProjects\Timer
 A **hub** window (normal, decorated) creates and manages multiple tiny transparent
 always-on-top timer overlay windows. Each timer window shows a countdown with a progress ring.
 
-**Planned feature — логирование дел + календарь-дашборд**: полный дизайн, модель данных
-(SQLite `activity.db` — таблица `blocks`: `id, name, start_ms, end_ms`), механика событий
-и фазы в `docs/activity-logging-spec.md`. План реализации — в
-`docs/activity-logging-implementation-plan.md`. При работе над этой фичей сначала читать
-спецификацию, потом план. Ключевое: таймеров может быть несколько, но открытое дело в
-каждый момент — максимум одно на всё приложение. Блок только один тип: таймер активен +
-дело введено. При остановке/AFK/выходе — блок закрывается, дело завершается. Никаких
-`break`/`away`, никаких `activities` + `blocks`, никаких `timer_label`. Оценки
-эффективности/пользы — планы на будущее, в v2.0 не реализуются.
+**Логирование дел + календарь-дашборд (v2.0, реализовано)**: модель данных (SQLite
+`activity.db` — таблица `blocks`: `id, name, start_ms, end_ms`), механика событий и фазы —
+в `docs/activity-logging-spec.md`. План реализации — в
+`docs/activity-logging-implementation-plan.md`, правила отчётов по блокам —
+в `docs/activity-report-rules.md`. При доработке сначала читать спецификацию, потом план.
+Ключевое: таймеров может быть несколько, но открытое дело в каждый момент — максимум одно на
+всё приложение. Блок только один тип: таймер активен + дело введено. При остановке/AFK/выходе —
+блок закрывается, дело завершается. Никаких `break`/`away`, никаких `activities` + `blocks`,
+никаких `timer_label`. Оценки эффективности/пользы — планы на будущее, в v2.0 не реализуются.
 
 ## Tech Stack
 - **Frontend**: Svelte 5 (runes only: `$state`, `$derived`, `$props`, `$effect`), TypeScript, Vanilla CSS
@@ -30,37 +30,32 @@ src/
 ├── main.ts                     # Entry: mount(App, {target}) + MCP bridge (dev only)
 ├── app.css                     # Global reset styles
 ├── constants.ts                # ALL UI constants (colors, sizes, TIMER/SESSION timings)
-├── App.svelte                  # Dispatcher: hub → Hub, timer-* → TimerOverlay, task-* → panels
+├── App.svelte                  # Dispatcher: hub → Hub, timer-* → TimerOverlay, dashboard → Dashboard
 └── lib/
     ├── timer.svelte.ts         # TimerModel — pure TS class, callbacks-based, restore()
-    ├── TimerWidget.svelte      # Timer UI + activity name field + ActivityLogger integration + idle auto-pause + external control
-    ├── TimerOverlay.svelte     # Timer window chrome: polling, snapshot report, panel buttons, event listeners
-    ├── Hub.svelte              # Hub UI: list, create, broadcast buttons, session coordinator
-    ├── TaskPanel.svelte        # Presentational task form (name, log, autopause, start/finish)
-    ├── FinishPanel.svelte      # UNUSED — presentational finish dialog (sliders deferred to future)
-    ├── TaskPanelWindow.svelte  # task-* popup window: wires TaskPanel to DB + emits to timer
-    ├── FinishPanelWindow.svelte# UNUSED — finish-* popup window
+    ├── TimerWidget.svelte      # Timer UI + deal name field + ActivityLogger integration + idle auto-pause
+    ├── TimerOverlay.svelte     # Timer window chrome: polling, snapshot report, event listeners
+    ├── Hub.svelte              # Hub UI: list, create, broadcast buttons, dashboard button, session coordinator
+    ├── Dashboard.svelte        # Week calendar window: hour grid, blocks, create/edit/delete popup
     ├── session.ts              # TimerSnapshot/TimerStateReport types + JSON serialize/parse
-    ├── activity.ts             # Block type + pure helpers (buildDayLane)
-    ├── activity-logger.ts      # ActivityLogger — pure block-flow planner (LogOp[]), restore(), begin(), stop()
+    ├── activity.ts             # Block type + pure helpers (buildDayLane, layoutBlockInDay, blockColor, activityDebounce)
+    ├── activity-logger.ts      # ActivityLogger — pure block-flow planner (LogOp[]), restore(), begin(), stop(), switchTo()
     ├── logger-runner.ts        # executeOps(ops, runner) + ipcLogRunner — maps LogOp → DB calls
-    ├── timer-control.ts        # TimerControl + Start/Config/LogState payload types
     ├── idle-pause.ts           # shouldAutoPause pure predicate (idle threshold, overtime, state)
-    ├── task-panel.ts           # computeTaskPrefill pure prefill logic for the task panel
-    ├── events.ts               # Event name constants (timer-snapshot, task-start, task-config, …)
-    ├── windows.ts              # Label helpers (hub / timer-* / task-*, id parsing)
+    ├── events.ts               # Event name constants (timer-snapshot, blocks-changed, activity-owner, …)
+    ├── windows.ts              # Label helpers (hub / timer-* / dashboard, id parsing)
     ├── format.ts               # formatClockTime (MM:SS)
     ├── TimerDisplay.svelte     # UNUSED text component (TimerWidget has inline span)
     ├── CircularProgress.svelte # UNUSED SVG ring (TimerWidget has inline SVG)
     ├── ipc.ts                  # Typed wrappers around invoke() for the Rust commands
     ├── interaction.ts          # Pure logic: computeInteractionMode + getInteractionAction
-    └── __tests__/              # timer, ipc, interaction, session, windows, activity, logger, runner, idle, panel tests
+    └── __tests__/              # timer, ipc, interaction, session, windows, activity, logger, runner, idle tests
 src-tauri/
-├── src/lib.rs                  # Rust commands + DWM + tray + session atomic write + multi-window + panel windows
+├── src/lib.rs                  # Rust commands + DWM + tray + session atomic write + multi-window + dashboard window
 ├── src/main.rs                 # Rust entry point
 ├── sounds/tick.wav             # Beep sound (embedded via include_bytes!, needs Rust rebuild)
-├── tauri.conf.json             # main window = hub (300x380, decorated); timer/panel windows created at runtime
-├── capabilities/default.json   # windows: ["hub", "timer-*", "task-*"] (glob), window perms
+├── tauri.conf.json             # main window = hub (300x380, decorated); timer/dashboard windows created at runtime
+├── capabilities/default.json   # windows: ["hub", "timer-*", "dashboard"] (glob), window perms
 └── Cargo.toml
 ```
 
@@ -69,17 +64,19 @@ src-tauri/
 > always-on-top only when `pinned` or overtime is active. Created from Rust via
 > `create_timer_window`. Visible in taskbar and Alt-Tab (`skip_taskbar(false)`) so timers are
 > reachable without the hub.
-> **Panel windows**: label `task-{timerLabel}`, 280×219
-> (includes a 14px draggable top strip, `PANEL_DRAG_STRIP_HEIGHT`),
-> `decorations:false`, `transparent:true`, `always_on_top:true`, `skip_taskbar:true`,
-> positioned **above the timer, horizontally centered** (`panel_position`: centered over
-> `timer-*`, clamped to the monitor; falls back below the timer when there's no room above).
-> Created via `create_task_panel`; they fetch `PanelInit` through
-> `get_panel_init` (pending map, same
-> pattern as `get_timer_init`). Panels drive the timer window via Tauri events
-> (`task-start`, `task-finish`, `task-config`); ALL DB mutations flow
-> through `TimerWidget`'s `ActivityLogger` + `logger-runner` (single source of truth).
-> Each window is its own Svelte instance; `App.svelte` picks the view from `label`.
+> **Dashboard window**: label `dashboard`, 960×600, `decorations:true`, `resizable:true`,
+> `skip_taskbar:false`, centered. Created via `create_dashboard_window`; if it already exists it
+> is shown and focused instead of duplicated. Queries the displayed week through `block_query`,
+> re-fetches on the `blocks-changed` event, and edits rows via `block_open` / `block_update` /
+> `block_delete` (Rust emits `blocks-changed` after every mutation). Opened from the hub header
+> (📅 button).
+> **Deal name / blocks**: the name field lives in `TimerWidget`. Typing debounces
+> `ACTIVITY_DEBOUNCE_MS` and then `ActivityLogger.switchTo()` closes the open block and opens a
+> new one; start/pause/resume/stop close or reopen it, AFK auto-pause closes it and resumes the
+> same name on return. Only one window may log a deal at a time: the owner broadcasts
+> `activity-owner { timerLabel, name }` and other timer windows lock their name input while
+> `name` is non-null. Timer-window DB mutations flow through `ActivityLogger` + `logger-runner`
+> (single source of truth); the dashboard writes rows directly.
 > **Блоки**: таблица `blocks` (`id, name, start_ms, end_ms`) — только work, без `activity_id`,
 > `kind`, `timer_label`. Открытых блоков максимум один глобально. Стоп/AFK/выход = закрыть блок.
 > `reconcile()` при старте **удаляет** брошенные открытые блоки (не проставляет `end_ms`,
@@ -104,6 +101,10 @@ src-tauri/
   emits `request-quit` → hub does final `save_session` → `quit_all` (destroy + exit).
   `quit_all` uses `destroy()` to bypass the hub hide-interception.
 - **Single instance**: `tauri-plugin-single-instance` focuses the existing hub on relaunch.
+- **Blocks**: the SQLite store is opened once in `setup()` (managed `BlocksDb`), migrated to
+  schema v2 there and reconciled before the hub appears. Timer windows own block writes
+  (`block_open` / `block_close` through `ActivityLogger`); the dashboard independently reads the
+  displayed week and receives `blocks-changed` after every mutation from Rust.
 
 ## Rules (MUST follow)
 
@@ -187,9 +188,9 @@ Rust provides `get_modifier_state` (Ctrl/Shift via `GetAsyncKeyState`) and
   `stroke-width=54`, progress via `stroke-dasharray/offset = 2π·85`.
 
 ## Gotchas
-- **svelte-check false errors**: TypeScript ~6.0.3 misreads Svelte 5 runes
-  (`Cannot use 'state' as a store`, etc.). 11 errors in `TimerWidget.svelte` are FALSE
-  positives (variable named `state` + `$state` declarations); vitest passes.
+- **svelte-check**: `npm run typecheck` currently reports **0 errors** and 6 warnings, all in
+  `Dashboard.svelte` (`a11y_no_static_element_interactions` / `a11y_click_events_have_key_events`
+  on clickable day cells, blocks and the popup backdrop). Vitest passes.
 - **Window size**: timer windows created wider/taller than 95×112. Fixed by
   `win.setSize(new LogicalSize(95, 112))` in `TimerOverlay.svelte` `$effect`.
 - **Sound**: `tick.wav` embedded via `include_bytes!` + `PlaySoundW(SND_MEMORY|SND_ASYNC)`.
@@ -214,13 +215,13 @@ Rust provides `get_modifier_state` (Ctrl/Shift via `GetAsyncKeyState`) and
   returns ms since last system input. `TimerWidget.maybeBeep()` skips `beep_system` when
   idle ≥ `TIMER.afkMuteMs` (60s) — independent of the `soundOn` button. Re-arms automatically
   when the user returns.
-- **`emit_to` is not strictly window-targeted in practice**: panel windows drive timers with
-  `emitTo(timerLabel, …)`, but Tauri v2.11 delivers those events to listeners registered with
-  `listen()` (target `Any`) in OTHER windows too — verified empirically (probe events targeted
-  at timer-2 fired listeners in timer-3). Every panel→timer command payload must carry
-  `timerLabel` and `TimerOverlay` must filter `e.payload.timerLabel !== win.label` before acting.
-  Same applies to hub-targeted `timer-snapshot` (broadcast-y but arrives at hub). Global
-  broadcasts (`mute-all`, `pin-all`) are intentionally unfiltered.
+- **`emit` is not strictly window-targeted in practice**: Tauri v2.11 delivers `emit` /
+  `emitTo` payloads to listeners registered with `listen()` (target `Any`) in ALL windows —
+  verified empirically (probe events targeted at timer-2 fired listeners in timer-3). So
+  `TimerWidget` broadcasts `activity-owner` with `timerLabel` and ignores its own message, and
+  any new cross-window payload must carry `timerLabel` and be filtered on the receiving side.
+  `timer-snapshot` is hub-targeted but also broadcast-y. Global broadcasts (`mute-all`,
+  `pin-all`), `blocks-changed` and `request-quit` are intentionally unfiltered.
 - **Float snapshot values break restore**: `TimerModel` remainingMs/durationMs accumulate float
   drift (e.g. `269894.6999…`). Rust `TimerSnapshot` deserializes into `i64` and rejects floats
   (`invalid type: floating point …, expected i64`), so restoring a *running* timer silently
