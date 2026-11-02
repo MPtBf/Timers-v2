@@ -6,7 +6,6 @@ export interface TimerStateReport {
   durationMs: number;
   remainingMs: number;
   state: TimerState;
-  activityId?: number | null;
 }
 
 export interface TimerSnapshot extends TimerStateReport {
@@ -20,25 +19,34 @@ export interface TimerSnapshot extends TimerStateReport {
 }
 
 export interface SessionFile {
-  version: 1;
+  version: number;
   timers: TimerSnapshot[];
 }
 
 export function serializeSession(timers: TimerSnapshot[]): string {
-  return JSON.stringify({ version: 1, timers });
+  return JSON.stringify({ version: 2, timers });
 }
 
 export function parseSession(text: string): TimerSnapshot[] | null {
   try {
     const data = JSON.parse(text) as Partial<SessionFile>;
-    if (!data || data.version !== 1 || !Array.isArray(data.timers)) return null;
+    if (!data || typeof data.version !== "number" || !Array.isArray(data.timers)) {
+      return null;
+    }
+    if (data.version !== 1 && data.version !== 2) return null;
     return data.timers
       .filter(isValidSnapshot)
       .map((t) => ({
-        ...t,
+        id: t.id,
         durationMs: Math.round(t.durationMs),
         remainingMs: Math.round(t.remainingMs),
-        activityId: t.activityId ?? null,
+        state: t.state,
+        soundOn: t.soundOn,
+        pinned: t.pinned,
+        x: t.x,
+        y: t.y,
+        w: t.w,
+        h: t.h,
       }));
   } catch {
     return null;
@@ -58,9 +66,6 @@ function isValidSnapshot(s: unknown): s is TimerSnapshot {
     typeof v.x === "number" &&
     typeof v.y === "number" &&
     typeof v.w === "number" &&
-    typeof v.h === "number" &&
-    (v.activityId === undefined ||
-      v.activityId === null ||
-      typeof v.activityId === "number")
+    typeof v.h === "number"
   );
 }

@@ -1,15 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { TimerSnapshot } from "./session";
-import type { Activity, ActivityBlock, ActivityBlockRow, Suggestions } from "./activity";
-
-export interface PanelInit {
-  timerLabel: string;
-  logEnabled: boolean | null;
-  autoPause: boolean | null;
-  activityId: number | null;
-  activityName: string | null;
-  minutes: number | null;
-}
+import type { Block } from "./activity";
 
 export async function setClickThrough(enabled: boolean): Promise<void> {
   await invoke("set_click_through", { enabled });
@@ -55,25 +46,8 @@ export async function getTimerInit(): Promise<TimerSnapshot | null> {
   return await invoke<TimerSnapshot | null>("get_timer_init");
 }
 
-export async function createTaskPanel(
-  timerLabel: string,
-  logEnabled: boolean | null,
-  autoPause: boolean | null,
-  minutes: number | null
-): Promise<void> {
-  await invoke("create_task_panel", { timerLabel, logEnabled, autoPause, minutes });
-}
-
-export async function createFinishPanel(
-  timerLabel: string,
-  activityId: number | null,
-  activityName: string | null
-): Promise<void> {
-  await invoke("create_finish_panel", { timerLabel, activityId, activityName });
-}
-
-export async function getPanelInit(): Promise<PanelInit | null> {
-  return await invoke<PanelInit | null>("get_panel_init");
+export async function createDashboardWindow(): Promise<void> {
+  await invoke("create_dashboard_window");
 }
 
 export async function hideTimers(): Promise<void> {
@@ -112,60 +86,45 @@ export async function getActivityDbPath(): Promise<string> {
   return await invoke<string>("get_activity_db_path");
 }
 
-export async function activityUpsert(activity: Activity): Promise<number> {
-  return await invoke<number>("activity_upsert", { activity });
+export async function activityInit(): Promise<void> {
+  await invoke<void>("activity_init");
 }
 
-export async function activityOpenBlock(block: ActivityBlock): Promise<number> {
-  return await invoke<number>("activity_open_block", { block });
+export async function blockOpen(
+  name: string,
+  startMs: number,
+  endMs: number | null = null
+): Promise<number> {
+  return await invoke<number>("block_open", { name, startMs, endMs });
 }
 
-export async function activityCloseBlock(
-  timerLabel: string,
-  endMs: number
-): Promise<number | null> {
-  return await invoke<number | null>("activity_close_block", { timerLabel, endMs });
+export async function blockClose(endMs: number): Promise<number | null> {
+  return await invoke<number | null>("block_close", { endMs });
 }
 
-export async function activityFinish(
-  activityId: number,
-  efficiency: number | null,
-  usefulness: number | null,
-  endedMs: number
+export async function blockDelete(id: number): Promise<void> {
+  await invoke<void>("block_delete", { id });
+}
+
+export async function blockUpdate(
+  id: number,
+  name: string,
+  startMs: number,
+  endMs: number | null
 ): Promise<void> {
-  return await invoke<void>("activity_finish", { activityId, efficiency, usefulness, endedMs });
+  await invoke<void>("block_update", { id, name, startMs, endMs });
 }
 
-export async function activityUpdateBlock(block: ActivityBlock): Promise<void> {
-  return await invoke<void>("activity_update_block", { block });
+export async function blockQuery(fromMs: number, toMs: number): Promise<Block[]> {
+  return await invoke<Block[]>("block_query", { fromMs, toMs });
 }
 
-export async function activityDeleteBlock(id: number): Promise<void> {
-  return await invoke<void>("activity_delete_block", { id });
+export async function blockSuggestions(): Promise<string[]> {
+  return await invoke<string[]>("block_suggestions");
 }
 
-export async function activityDeleteActivity(id: number): Promise<void> {
-  return await invoke<void>("activity_delete_activity", { id });
-}
-
-export async function activityQuery(fromMs: number, toMs: number): Promise<ActivityBlockRow[]> {
-  return await invoke<ActivityBlockRow[]>("activity_query", { fromMs, toMs });
-}
-
-export async function activityGetOpenBlock(timerLabel: string): Promise<ActivityBlockRow | null> {
-  return await invoke<ActivityBlockRow | null>("activity_get_open_block", { timerLabel });
-}
-
-export async function activityGetGlobalOpenBlock(): Promise<ActivityBlockRow | null> {
-  return await invoke<ActivityBlockRow | null>("activity_get_global_open_block");
-}
-
-export async function activitySuggestions(): Promise<Suggestions> {
-  return await invoke<Suggestions>("activity_suggestions");
-}
-
-export async function activityReconcile(cutoffMs: number): Promise<number> {
-  return await invoke<number>("activity_reconcile", { cutoffMs });
+export async function activityReconcile(): Promise<number> {
+  return await invoke<number>("activity_reconcile");
 }
 
 export async function quitAll(): Promise<void> {

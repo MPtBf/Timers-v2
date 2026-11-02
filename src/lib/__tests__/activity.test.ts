@@ -1,100 +1,46 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
-  parseTags,
-  serializeTags,
-  ratingMetric,
   buildDayLane,
-  type ActivityBlockRow,
-  type DayLaneBlock,
+  layoutBlockInDay,
+  isValidBlockName,
+  isValidBlockRange,
+  blockHue,
+  blockColor,
+  activityDebounce,
+  type Block,
 } from "../activity";
 
 const MIN = 60000;
 const DAY = 86400000;
 
-function row(partial: Partial<ActivityBlockRow> = {}): ActivityBlockRow {
-  return {
-    id: 1,
-    activityId: 1,
-    kind: "work",
-    startMs: 0,
-    endMs: null,
-    timerLabel: "timer-1",
-    activityName: "Писать парсер",
-    activityCategory: "Работа",
-    tags: null,
-    status: "active",
-    efficiency: null,
-    usefulness: null,
-    logEnabled: true,
-    ...partial,
-  };
+function block(partial: Partial<Block> = {}): Block {
+  return { id: 1, name: "Писать парсер", startMs: 0, endMs: null, ...partial };
 }
 
-function lane(partial: Partial<DayLaneBlock> = {}): DayLaneBlock {
-  return {
-    id: 1,
-    activityId: 1,
-    kind: "work",
-    startMs: 0,
-    endMs: 0,
-    open: false,
-    activityName: "Писать парсер",
-    activityCategory: "Работа",
-    tags: null,
-    status: "active",
-    efficiency: null,
-    usefulness: null,
-    ...partial,
-  };
-}
-
-describe("serializeTags / parseTags", () => {
-  it("roundtrips empty array", () => {
-    expect(parseTags(serializeTags([]))).toEqual([]);
+describe("isValidBlockName", () => {
+  it("accepts non-empty names", () => {
+    expect(isValidBlockName("Парсер")).toBe(true);
+    expect(isValidBlockName("  a  ")).toBe(true);
   });
 
-  it("roundtrips tags preserving order and duplicates", () => {
-    const tags = ["глубокий", "один", "глубокий"];
-    expect(parseTags(serializeTags(tags))).toEqual(tags);
-  });
-
-  it("returns [] for non-array JSON", () => {
-    expect(parseTags('{"a":1}')).toEqual([]);
-    expect(parseTags("null")).toEqual([]);
-    expect(parseTags("42")).toEqual([]);
-  });
-
-  it("filters out non-string elements", () => {
-    expect(parseTags('[1, "ok", true]')).toEqual(["ok"]);
-  });
-
-  it("returns [] for invalid JSON", () => {
-    expect(parseTags("not json")).toEqual([]);
-    expect(parseTags("")).toEqual([]);
+  it("rejects empty or whitespace-only names", () => {
+    expect(isValidBlockName("")).toBe(false);
+    expect(isValidBlockName("   ")).toBe(false);
   });
 });
 
-describe("ratingMetric", () => {
-  it("efficiency mode returns efficiency", () => {
-    expect(ratingMetric(80, 40, "efficiency")).toBe(80);
+describe("isValidBlockRange", () => {
+  it("accepts end >= start", () => {
+    expect(isValidBlockRange(1000, 2000)).toBe(true);
+    expect(isValidBlockRange(1000, 1000)).toBe(true);
   });
 
-  it("usefulness mode returns usefulness", () => {
-    expect(ratingMetric(80, 40, "usefulness")).toBe(40);
+  it("accepts open blocks", () => {
+    expect(isValidBlockRange(1000, null)).toBe(true);
   });
 
-  it("average of both ratings", () => {
-    expect(ratingMetric(80, 40, "average")).toBe(60);
-  });
-
-  it("average falls back to the single present rating", () => {
-    expect(ratingMetric(80, null, "average")).toBe(80);
-    expect(ratingMetric(null, 40, "average")).toBe(40);
-  });
-
-  it("returns null when no ratings are present", () => {
-    expect(ratingMetric(null, null, "efficiency")).toBeNull();
-    expect(ratingMetric(null, null, "average")).toBeNull();
+  it("rejects end < start", () => {
+    expect(isValidBlockRange(5000, 1000)).toBe(false);
   });
 });
 
@@ -106,106 +52,182 @@ describe("buildDayLane", () => {
   });
 
   it("sorts blocks by start time", () => {
-    const a = row({ id: 1, startMs: 3000, endMs: 4000 });
-    const b = row({ id: 2, startMs: 1000, endMs: 2000 });
-    const c = row({ id: 3, startMs: 500, endMs: 900 });
-    const result = buildDayLane([a, b, c], range, DAY);
-    expect(result.map((r) => r.id)).toEqual([3, 2, 1]);
+    const a = block({ id: 1, startMs: 3000, endMs: 4000 });
+    const b = block({ id: 2, startMs: 1000, endMs: 2000 });
+    const c = block({ id: 3, startMs: 500, endMs: 900 });
+    expect(buildDayLane([a, b, c], range, DAY).map((r) => r.id)).toEqual([3, 2, 1]);
   });
 
   it("is stable on start-time ties, ordering by id", () => {
-    const a = row({ id: 5, startMs: 1000, endMs: 2000 });
-    const b = row({ id: 2, startMs: 1000, endMs: 1500 });
-    const result = buildDayLane([a, b], range, DAY);
-    expect(result.map((r) => r.id)).toEqual([2, 5]);
+    const a = block({ id: 5, startMs: 1000, endMs: 2000 });
+    const b = block({ id: 2, startMs: 1000, endMs: 1500 });
+    expect(buildDayLane([a, b], range, DAY).map((r) => r.id)).toEqual([2, 5]);
   });
 
   it("clips start before the range to range start", () => {
-    const a = row({ startMs: -MIN, endMs: 2 * MIN });
+    const a = block({ startMs: -MIN, endMs: 2 * MIN });
     const result = buildDayLane([a], range, DAY);
     expect(result[0].startMs).toBe(0);
     expect(result[0].endMs).toBe(2 * MIN);
   });
 
   it("clips end after the range to range end", () => {
-    const a = row({ startMs: DAY - MIN, endMs: DAY + MIN });
+    const a = block({ startMs: DAY - MIN, endMs: DAY + MIN });
     const result = buildDayLane([a], range, DAY);
     expect(result[0].startMs).toBe(DAY - MIN);
     expect(result[0].endMs).toBe(DAY);
   });
 
   it("excludes blocks entirely before the range", () => {
-    const a = row({ startMs: -2 * MIN, endMs: -MIN });
-    expect(buildDayLane([a], range, DAY)).toEqual([]);
+    expect(buildDayLane([block({ startMs: -2 * MIN, endMs: -MIN })], range, DAY)).toEqual([]);
   });
 
   it("excludes blocks entirely after the range", () => {
-    const a = row({ startMs: DAY + MIN, endMs: DAY + 2 * MIN });
-    expect(buildDayLane([a], range, DAY)).toEqual([]);
+    expect(
+      buildDayLane([block({ startMs: DAY + MIN, endMs: DAY + 2 * MIN })], range, DAY)
+    ).toEqual([]);
   });
 
   it("resolves an open block to now, clipped to the range", () => {
-    const a = row({ startMs: 3 * MIN, endMs: null });
-    const result = buildDayLane([a], range, 5 * MIN);
+    const result = buildDayLane([block({ startMs: 3 * MIN, endMs: null })], range, 5 * MIN);
     expect(result[0].endMs).toBe(5 * MIN);
     expect(result[0].open).toBe(true);
   });
 
   it("clips an open block to range end when now is beyond it", () => {
-    const a = row({ startMs: DAY - MIN, endMs: null });
-    const result = buildDayLane([a], range, DAY + MIN);
+    const result = buildDayLane([block({ startMs: DAY - MIN, endMs: null })], range, DAY + MIN);
     expect(result[0].endMs).toBe(DAY);
     expect(result[0].open).toBe(true);
   });
 
   it("excludes an open block that starts at or after now", () => {
-    const a = row({ startMs: 6 * MIN, endMs: null });
-    expect(buildDayLane([a], range, 5 * MIN)).toEqual([]);
+    expect(buildDayLane([block({ startMs: 6 * MIN, endMs: null })], range, 5 * MIN)).toEqual([]);
   });
 
   it("drops zero-length and negative-length blocks", () => {
-    const zero = row({ id: 1, startMs: 1000, endMs: 1000 });
-    const neg = row({ id: 2, startMs: 5000, endMs: 1000 });
+    const zero = block({ id: 1, startMs: 1000, endMs: 1000 });
+    const neg = block({ id: 2, startMs: 5000, endMs: 1000 });
     expect(buildDayLane([zero, neg], range, DAY)).toEqual([]);
   });
 
-  it("carries activity fields and sets open=false for closed blocks", () => {
-    const a = row({ startMs: MIN, endMs: 2 * MIN, efficiency: 80, usefulness: 60 });
-    const result = buildDayLane([a], range, DAY);
-    expect(result[0]).toEqual(
-      lane({
-        startMs: MIN,
-        endMs: 2 * MIN,
-        efficiency: 80,
-        usefulness: 60,
-      })
-    );
-  });
-
-  it("keeps break blocks with null activity fields", () => {
-    const a = row({
-      id: 2,
-      activityId: null,
-      kind: "break",
-      startMs: MIN,
-      endMs: 2 * MIN,
-      activityName: null,
-      activityCategory: null,
-      tags: null,
-      status: null,
-      efficiency: null,
-      usefulness: null,
-    });
-    const result = buildDayLane([a], range, DAY);
-    expect(result[0].activityId).toBeNull();
-    expect(result[0].activityName).toBeNull();
-    expect(result[0].efficiency).toBeNull();
+  it("sets open=false for closed blocks", () => {
+    const result = buildDayLane([block({ startMs: MIN, endMs: 2 * MIN })], range, DAY);
+    expect(result[0].open).toBe(false);
+    expect(result[0].name).toBe("Писать парсер");
   });
 
   it("does not mutate the input rows", () => {
-    const a = row({ startMs: -MIN, endMs: DAY + MIN });
+    const a = block({ startMs: -MIN, endMs: DAY + MIN });
     buildDayLane([a], range, DAY);
     expect(a.startMs).toBe(-MIN);
     expect(a.endMs).toBe(DAY + MIN);
+  });
+});
+
+describe("layoutBlockInDay", () => {
+  // Visible window 06:00 (21600000) .. 24:00 (86400000).
+  const bounds = { fromMs: 21600000, toMs: 86400000 };
+
+  it("returns null when the block does not intersect the window", () => {
+    expect(layoutBlockInDay(block({ startMs: 0, endMs: 1000 }), bounds, 86400000)).toBeNull();
+    expect(
+      layoutBlockInDay(block({ startMs: 86400000, endMs: 86500000 }), bounds, 86400000)
+    ).toBeNull();
+  });
+
+  it("positions a block with minute precision", () => {
+    // 06:30 → 07:30.
+    const start = 21600000 + 30 * 60000;
+    const end = start + 3600000;
+    const layout = layoutBlockInDay(block({ startMs: start, endMs: end }), bounds, 86400000)!;
+    expect(layout.topPct).toBeCloseTo((30 * 60000 / (18 * 3600000)) * 100, 6);
+    expect(layout.heightPct).toBeCloseTo((3600000 / (18 * 3600000)) * 100, 6);
+  });
+
+  it("clips a block that starts before the window", () => {
+    const layout = layoutBlockInDay(block({ startMs: 0, endMs: 21600000 + 3600000 }), bounds, 86400000)!;
+    expect(layout.topPct).toBe(0);
+    expect(layout.heightPct).toBeCloseTo((3600000 / (18 * 3600000)) * 100, 6);
+  });
+
+  it("clips a block that ends after the window", () => {
+    const layout = layoutBlockInDay(
+      block({ startMs: 86400000 - 3600000, endMs: 86400000 + 3600000 }),
+      bounds,
+      86400000
+    )!;
+    expect(layout.heightPct).toBeCloseTo((3600000 / (18 * 3600000)) * 100, 6);
+  });
+
+  it("resolves an open block to now, clipped to the window", () => {
+    const start = 21600000 + 3600000;
+    const now = start + 3600000;
+    const layout = layoutBlockInDay(block({ startMs: start, endMs: null }), bounds, now)!;
+    expect(layout.heightPct).toBeCloseTo((3600000 / (18 * 3600000)) * 100, 6);
+  });
+
+  it("returns null for an open block that has not started yet relative to now", () => {
+    const start = 21600000 + 3600000;
+    expect(
+      layoutBlockInDay(block({ startMs: start, endMs: null }), bounds, start - 1000)
+    ).toBeNull();
+  });
+
+  it("returns null for zero or negative span", () => {
+    expect(layoutBlockInDay(block({ startMs: 1000, endMs: 1000 }), bounds, 86400000)).toBeNull();
+    expect(layoutBlockInDay(block({ startMs: 5000, endMs: 1000 }), bounds, 86400000)).toBeNull();
+  });
+});
+
+describe("blockColor", () => {
+  it("is deterministic for the same name", () => {
+    expect(blockColor("Парсер")).toBe(blockColor("Парсер"));
+  });
+
+  it("returns hue in range for any name", () => {
+    for (const n of ["a", "Парсер", "", "zzzzzzzz"]) {
+      const hue = blockHue(n);
+      expect(hue).toBeGreaterThanOrEqual(0);
+      expect(hue).toBeLessThan(360);
+    }
+  });
+});
+
+describe("activityDebounce", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("fires once after the delay of silence", () => {
+    const fn = vi.fn();
+    const d = activityDebounce(fn, 10000);
+    d.push();
+    d.push();
+    d.push();
+    vi.advanceTimersByTime(9999);
+    expect(fn).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("resets the timer on each push", () => {
+    const fn = vi.fn();
+    const d = activityDebounce(fn, 10000);
+    d.push();
+    vi.advanceTimersByTime(5000);
+    d.push();
+    vi.advanceTimersByTime(5000);
+    expect(fn).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(5000);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancel prevents the pending call", () => {
+    const fn = vi.fn();
+    const d = activityDebounce(fn, 10000);
+    d.push();
+    vi.advanceTimersByTime(5000);
+    d.cancel();
+    vi.advanceTimersByTime(20000);
+    expect(fn).not.toHaveBeenCalled();
   });
 });

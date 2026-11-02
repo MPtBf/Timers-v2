@@ -1,71 +1,16 @@
-export type BlockKind = "work" | "break" | "away";
-export type ActivityStatus = "active" | "finished";
-export type RatingMode = "efficiency" | "usefulness" | "average";
-
-export interface Activity {
-  id: number | null;
-  name: string;
-  category: string;
-  tags: string[];
-  parentId: number | null;
-  logEnabled: boolean;
-  status: ActivityStatus;
-  efficiency: number | null;
-  usefulness: number | null;
-  startedMs: number;
-  endedMs: number | null;
-}
-
-export interface ActivityBlock {
-  id: number | null;
-  activityId: number | null;
-  kind: BlockKind;
-  startMs: number;
-  endMs: number | null;
-  timerLabel: string;
-}
-
-export interface ActivityBlockRow {
+export interface Block {
   id: number;
-  activityId: number | null;
-  kind: BlockKind;
+  name: string;
   startMs: number;
   endMs: number | null;
-  timerLabel: string;
-  activityName: string | null;
-  activityCategory: string | null;
-  tags: string[] | null;
-  status: ActivityStatus | null;
-  efficiency: number | null;
-  usefulness: number | null;
-  logEnabled: boolean | null;
 }
 
 export interface DayLaneBlock {
   id: number;
-  activityId: number | null;
-  kind: BlockKind;
+  name: string;
   startMs: number;
   endMs: number;
   open: boolean;
-  activityName: string | null;
-  activityCategory: string | null;
-  tags: string[] | null;
-  status: ActivityStatus | null;
-  efficiency: number | null;
-  usefulness: number | null;
-}
-
-export interface ActivitySummary {
-  id: number;
-  name: string;
-  category: string;
-  status: ActivityStatus;
-}
-
-export interface Suggestions {
-  categories: string[];
-  activities: ActivitySummary[];
 }
 
 export interface DayRange {
@@ -73,64 +18,104 @@ export interface DayRange {
   toMs: number;
 }
 
-export function serializeTags(tags: string[]): string {
-  return JSON.stringify(tags);
+export interface DayViewBounds {
+  fromMs: number;
+  toMs: number;
 }
 
-export function parseTags(json: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(json);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((t): t is string => typeof t === "string");
-  } catch {
-    return [];
-  }
+/**
+ * Lays out a block inside a day's visible window (e.g. 06:00–24:00), returning
+ * percentage offsets for absolute positioning. Clips the block to the window,
+ * resolves open blocks to `nowMs`, and returns null when nothing is visible.
+ */
+export function layoutBlockInDay(
+  block: Block,
+  bounds: DayViewBounds,
+  nowMs: number
+): { topPct: number; heightPct: number } | null {
+  const span = bounds.toMs - bounds.fromMs;
+  if (span <= 0) return null;
+
+  const open = block.endMs === null;
+  const rawEnd = open ? Math.min(nowMs, bounds.toMs) : (block.endMs as number);
+  const start = Math.max(block.startMs, bounds.fromMs);
+  const end = Math.min(rawEnd, bounds.toMs);
+
+  if (end <= start) return null;
+
+  return {
+    topPct: ((start - bounds.fromMs) / span) * 100,
+    heightPct: ((end - start) / span) * 100,
+  };
 }
 
-export function ratingMetric(
-  efficiency: number | null,
-  usefulness: number | null,
-  mode: RatingMode
-): number | null {
-  if (mode === "efficiency") return efficiency;
-  if (mode === "usefulness") return usefulness;
-  if (efficiency !== null && usefulness !== null) return (efficiency + usefulness) / 2;
-  return efficiency ?? usefulness;
+export function isValidBlockName(name: string): boolean {
+  return name.trim().length > 0;
+}
+
+export function isValidBlockRange(startMs: number, endMs: number | null): boolean {
+  return endMs === null || endMs >= startMs;
 }
 
 export function buildDayLane(
-  rows: ActivityBlockRow[],
+  blocks: Block[],
   range: DayRange,
   nowMs: number
 ): DayLaneBlock[] {
   const result: DayLaneBlock[] = [];
 
-  for (const r of rows) {
-    if (r.startMs >= range.toMs) continue;
+  for (const b of blocks) {
+    if (b.startMs >= range.toMs) continue;
 
-    const start = Math.max(r.startMs, range.fromMs);
-    const open = r.endMs === null;
-    const rawEnd = r.endMs ?? Math.min(nowMs, range.toMs);
+    const start = Math.max(b.startMs, range.fromMs);
+    const open = b.endMs === null;
+    const rawEnd = b.endMs ?? Math.min(nowMs, range.toMs);
     const end = Math.min(rawEnd, range.toMs);
 
     if (end <= start) continue;
 
-    result.push({
-      id: r.id,
-      activityId: r.activityId,
-      kind: r.kind,
-      startMs: start,
-      endMs: end,
-      open,
-      activityName: r.activityName,
-      activityCategory: r.activityCategory,
-      tags: r.tags,
-      status: r.status,
-      efficiency: r.efficiency,
-      usefulness: r.usefulness,
-    });
+    result.push({ id: b.id, name: b.name, startMs: start, endMs: end, open });
   }
 
   result.sort((a, b) => a.startMs - b.startMs || a.id - b.id);
   return result;
+}
+
+/** Deterministic hue (0-360) from a block name. */
+export function blockHue(name: string): number {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = (hash*143 + 158*name.charCodeAt(i)) | 0;
+  }
+  return ((hash % 360) + 360) % 360;
+}
+
+/** Deterministic HSL color for a block name (S=80%, L=50%). */
+export function blockColor(name: string): string {
+  return `hsl(${blockHue(name)}, 70%, 30%)`;
+}
+
+export interface Debouncer {
+  push: () => void;
+  cancel: () => void;
+}
+
+/** Timer-based debouncer; `fn` runs once after `ms` of silence. */
+export function activityDebounce(fn: () => void, ms: number): Debouncer {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return {
+    push: () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        fn();
+      }, ms);
+    },
+    cancel: () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  };
 }

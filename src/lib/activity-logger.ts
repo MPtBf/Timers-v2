@@ -1,142 +1,69 @@
-import type { BlockKind } from "./activity";
-
-export interface LogBlock {
-  id: number | null;
-  activityId: number | null;
-  kind: BlockKind;
-  startMs: number;
-  endMs: number | null;
-  timerLabel: string;
-}
-
 export type LogOp =
-  | { type: "open"; block: LogBlock }
-  | { type: "close"; timerLabel: string; endMs: number }
-  | {
-      type: "finish";
-      activityId: number;
-      efficiency: number | null;
-      usefulness: number | null;
-      endedMs: number;
-    };
+  | { type: "open"; name: string; startMs: number }
+  | { type: "close"; endMs: number };
 
+/**
+ * Pure block-flow planner. Tracks the current task name and whether a block is
+ * open. Produces a minimal sequence of open/close operations; never emits
+ * activity ids, block kinds, timer labels, or finish operations.
+ */
 export class ActivityLogger {
-  private _timerLabel: string;
-  private _logEnabled: boolean;
-  private _activityId: number | null = null;
-  private _openKind: BlockKind | null = null;
+  private _name: string | null = null;
+  private _open: boolean = false;
 
-  constructor(timerLabel: string, logEnabled = true) {
-    this._timerLabel = timerLabel;
-    this._logEnabled = logEnabled;
-  }
-
-  get timerLabel(): string {
-    return this._timerLabel;
-  }
-
-  get logEnabled(): boolean {
-    return this._logEnabled;
-  }
-
-  get activityId(): number | null {
-    return this._activityId;
-  }
-
-  get openKind(): BlockKind | null {
-    return this._openKind;
+  get name(): string | null {
+    return this._name;
   }
 
   get hasOpenBlock(): boolean {
-    return this._openKind !== null;
+    return this._open;
   }
 
-  setLogEnabled(enabled: boolean): void {
-    this._logEnabled = enabled;
+  restore(name: string | null): void {
+    this._name = name ? name.trim() || null : null;
+    this._open = this._name !== null;
   }
 
-  restore(activityId: number | null, openKind: BlockKind | null): void {
-    this._activityId = activityId;
-    this._openKind = openKind;
-  }
-
-  start(activityId: number | null, startMs: number): LogOp[] {
-    if (!this._logEnabled || activityId === null || this._openKind !== null) return [];
-    this._activityId = activityId;
-    this._openKind = "work";
-    return [{ type: "open", block: this._block(activityId, "work", startMs, null) }];
-  }
-
-  begin(activityId: number | null, startMs: number): LogOp[] {
+  /** Begin logging a task. Closes a leftover open block first if needed. */
+  begin(name: string | null, startMs: number): LogOp[] {
     const ops: LogOp[] = [];
-    if (this._openKind !== null) {
-      ops.push({ type: "close", timerLabel: this._timerLabel, endMs: startMs });
-      this._openKind = null;
+    if (this._open) {
+      ops.push({ type: "close", endMs: startMs });
+      this._open = false;
     }
-    if (this._logEnabled && activityId !== null) {
-      this._activityId = activityId;
-      this._openKind = "work";
-      ops.push({ type: "open", block: this._block(activityId, "work", startMs, null) });
-    } else {
-      this._activityId = null;
+    const trimmed = name ? name.trim() || null : null;
+    this._name = trimmed;
+    if (trimmed !== null) {
+      this._open = true;
+      ops.push({ type: "open", name: trimmed, startMs });
     }
     return ops;
   }
 
-  pause(nowMs: number, kind: BlockKind = "break"): LogOp[] {
-    if (this._openKind !== "work") return [];
-    this._openKind = kind;
-    return [
-      { type: "close", timerLabel: this._timerLabel, endMs: nowMs },
-      { type: "open", block: this._block(null, kind, nowMs, null) },
-    ];
-  }
-
-  resume(nowMs: number): LogOp[] {
-    if (this._openKind !== "break" && this._openKind !== "away") return [];
-    if (this._activityId === null) return [];
-    this._openKind = "work";
-    return [
-      { type: "close", timerLabel: this._timerLabel, endMs: nowMs },
-      { type: "open", block: this._block(this._activityId, "work", nowMs, null) },
-    ];
-  }
-
+  /** Close the current block and forget the name. */
   stop(nowMs: number): LogOp[] {
-    if (this._openKind === null) return [];
-    this._openKind = null;
-    return [{ type: "close", timerLabel: this._timerLabel, endMs: nowMs }];
+    if (!this._open) {
+      this._name = null;
+      return [];
+    }
+    this._open = false;
+    this._name = null;
+    return [{ type: "close", endMs: nowMs }];
   }
 
-  finish(
-    efficiency: number | null,
-    usefulness: number | null,
-    endedMs: number
-  ): LogOp[] {
+  /** Swap the running task: close the current block and open a new one. */
+  switchTo(name: string | null, nowMs: number): LogOp[] {
     const ops: LogOp[] = [];
-    if (this._openKind !== null) {
-      ops.push({ type: "close", timerLabel: this._timerLabel, endMs: endedMs });
-      this._openKind = null;
+    if (this._open) {
+      ops.push({ type: "close", endMs: nowMs });
+      this._open = false;
     }
-    if (this._activityId !== null) {
-      ops.push({
-        type: "finish",
-        activityId: this._activityId,
-        efficiency,
-        usefulness,
-        endedMs,
-      });
-      this._activityId = null;
+    const trimmed = name ? name.trim() || null : null;
+    this._name = trimmed;
+    if (trimmed !== null) {
+      this._open = true;
+      ops.push({ type: "open", name: trimmed, startMs: nowMs });
     }
     return ops;
-  }
-
-  private _block(
-    activityId: number | null,
-    kind: BlockKind,
-    startMs: number,
-    endMs: number | null
-  ): LogBlock {
-    return { id: null, activityId, kind, startMs, endMs, timerLabel: this._timerLabel };
   }
 }
